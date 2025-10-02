@@ -1,1 +1,1 @@
-# stripe-acf-field
+# Stripe ACF Field for Wordpress
