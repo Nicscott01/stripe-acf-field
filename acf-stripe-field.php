@@ -1,15 +1,16 @@
 <?php
 /**
- * Plugin Name: ACF Stripe Customer Field
- * Description: Adds a Stripe Customer select field type to Advanced Custom Fields.
+ * Plugin Name: ACF Stripe Field
+ * Description: Adds a Stripe fields to Advanced Custom Fields.
  * Version: 1.0.0
- * Author: OpenAI Assistant
- * Text Domain: acf-stripe-customer-field
+ * Author: Nic Scott
+ * Text Domain: acf-stripe-field
  */
 
 if (!defined('ABSPATH')) {
     exit;
 }
+
 
 if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
     class ACF_Stripe_Customer_Field_Plugin
@@ -32,7 +33,9 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
             add_action('wp_enqueue_scripts', [$this, 'enqueue_field_assets_frontend']);
             add_action('wp_ajax_acf_stripe_search_customers', [$this, 'ajax_search_customers']);
             add_action('wp_ajax_nopriv_acf_stripe_search_customers', [$this, 'ajax_search_customers']);
-            
+            add_action('wp_ajax_acf_stripe_search_subscriptions', [$this, 'ajax_search_subscriptions']);
+            add_action('wp_ajax_nopriv_acf_stripe_search_subscriptions', [$this, 'ajax_search_subscriptions']);
+
             // Debug: Log plugin initialization
             if (defined('WP_DEBUG') && WP_DEBUG) {
                 error_log('ACF Stripe Customer Field Plugin initialized');
@@ -55,7 +58,9 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
             }
             
             require_once $this->path . 'includes/class-acf-field-stripe-customer.php';
+            require_once $this->path . 'includes/class-acf-field-stripe-subscription.php';
             new ACF_Field_Stripe_Customer($this);
+            new ACF_Field_Stripe_Subscription($this);
         }
 
         public function enqueue_field_assets()
@@ -80,6 +85,21 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
                 ],
             ]);
             wp_enqueue_script('acf-stripe-customer-field');
+
+            wp_register_script('acf-stripe-subscription-field', $this->url . 'assets/js/stripe-subscription-field.js', ['jquery', 'acf-input', 'select2'], '1.0.1', true);
+            wp_localize_script('acf-stripe-subscription-field', 'acfStripeSubscriptionField', [
+                'ajaxUrl'    => admin_url('admin-ajax.php'),
+                'nonce'      => wp_create_nonce('acf_stripe_subscription_search'),
+                'isConnected'=> $this->is_connected(),
+                'debug'      => defined('WP_DEBUG') && WP_DEBUG,
+                'strings'    => [
+                    'placeholder'  => __('Select a Stripe subscription', 'acf-stripe-subscription-field'),
+                    'noConnection' => __('Connect your Stripe account to search for subscriptions.', 'acf-stripe-subscription-field'),
+                    'noResults'    => __('No subscriptions found.', 'acf-stripe-subscription-field'),
+                    'error'        => __('Unable to load subscriptions.', 'acf-stripe-subscription-field'),
+                ],
+            ]);
+            wp_enqueue_script('acf-stripe-subscription-field');
         }
 
         public function enqueue_field_assets_frontend()
@@ -438,6 +458,222 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
         protected function is_acf_admin_available()
         {
             return post_type_exists('acf-field-group');
+        }
+
+
+
+        public function ajax_search_subscriptions()
+        {
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('ACF Stripe Subscription AJAX request started');
+                error_log('Request data: ' . print_r($_REQUEST, true));
+            }
+
+            if (!wp_verify_nonce($_REQUEST['nonce'], 'acf_stripe_subscription_search')) {
+                if (defined('WP_DEBUG') && WP_DEBUG) {
+                    error_log('ACF Stripe Subscription AJAX: Nonce verification failed');
+                }
+                wp_send_json_error(['message' => __('Security check failed.', 'acf-stripe-subscription-field')], 403);
+            }
+
+            if (!current_user_can('edit_posts')) {
+                if (defined('WP_DEBUG') && WP_DEBUG) {
+                    error_log('ACF Stripe Subscription AJAX: Permission check failed');
+                }
+                wp_send_json_error(['message' => __('You do not have permission to perform this request.', 'acf-stripe-subscription-field')], 403);
+            }
+
+            $secret_key = $this->get_secret_key();
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log(sprintf('ACF Stripe Subscription AJAX request — secret length: %d, connected: %s', strlen($secret_key), $this->is_connected() ? 'yes' : 'no'));
+            }
+            if ('' === $secret_key) {
+                wp_send_json_error(['message' => __('Stripe secret key is missing.', 'acf-stripe-subscription-field')], 400);
+            }
+
+            $request = wp_unslash($_REQUEST);
+            $search  = isset($request['search']) ? sanitize_text_field($request['search']) : '';
+
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('ACF Stripe Subscription AJAX: Searching for: ' . $search);
+            }
+
+            // If searching for a specific subscription ID, fetch that subscription directly.
+            if (!empty($search) && preg_match('/^sub_[a-zA-Z0-9]+$/', $search)) {
+                if (defined('WP_DEBUG') && WP_DEBUG) {
+                    error_log('ACF Stripe Subscription AJAX: Fetching specific subscription: ' . $search);
+                }
+                $subscription = $this->fetch_subscription($search, $secret_key);
+                if (is_wp_error($subscription)) {
+                    if (defined('WP_DEBUG') && WP_DEBUG) {
+                        error_log('ACF Stripe Subscription AJAX: Subscription fetch error: ' . $subscription->get_error_message());
+                    }
+                    wp_send_json_error(['message' => $subscription->get_error_message()], 500);
+                }
+                $items = [
+                    $this->prepare_subscription_item($subscription),
+                ];
+                if (defined('WP_DEBUG') && WP_DEBUG) {
+                    error_log('ACF Stripe Subscription AJAX: Returning single subscription: ' . $subscription['id']);
+                }
+                wp_send_json_success(['items' => $items, 'more' => false]);
+            }
+
+            $subscriptions = $this->fetch_subscriptions($search, $secret_key);
+            if (is_wp_error($subscriptions)) {
+                if (defined('WP_DEBUG') && WP_DEBUG) {
+                    error_log('ACF Stripe Subscription AJAX: Stripe API error: ' . $subscriptions->get_error_message());
+                }
+                wp_send_json_error(['message' => $subscriptions->get_error_message()], 500);
+            }
+
+            $items = [];
+            if (!empty($subscriptions['data']) && is_array($subscriptions['data'])) {
+                foreach ($subscriptions['data'] as $sub) {
+                    $items[] = $this->prepare_subscription_item($sub);
+                }
+            }
+
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('ACF Stripe Subscription AJAX: Returning ' . count($items) . ' subscriptions');
+            }
+
+            wp_send_json_success(['items' => $items, 'more' => false]);
+        }
+
+        public function fetch_subscriptions($search = '', $secret_key = null)
+        {
+            $secret_key = null === $secret_key ? $this->get_secret_key() : $secret_key;
+
+            if (empty($secret_key)) {
+                return new WP_Error('acf_stripe_missing_token', __('Stripe secret key is missing.', 'acf-stripe-subscription-field'));
+            }
+
+            $endpoint = 'https://api.stripe.com/v1/subscriptions';
+            $url      = add_query_arg(['limit' => 20], $endpoint);
+            $url     .= '&expand[]=data.customer&expand[]=data.items.data.plan&expand[]=data.items.data.price';
+
+            // Note: Stripe's subscriptions API does not support search queries.
+            $response = $this->perform_stripe_get($url, $secret_key);
+
+            return $this->maybe_decode_stripe_response($response, __('Unable to retrieve subscriptions from Stripe.', 'acf-stripe-subscription-field'));
+        }
+
+        public function fetch_subscription($subscription_id, $secret_key = null)
+        {
+            $secret_key = null === $secret_key ? $this->get_secret_key() : $secret_key;
+
+            if (empty($secret_key)) {
+                return new WP_Error('acf_stripe_missing_token', __('Stripe secret key is missing.', 'acf-stripe-subscription-field'));
+            }
+
+            $subscription_id = trim($subscription_id);
+            if ('' === $subscription_id) {
+                return new WP_Error('acf_stripe_missing_subscription', __('Subscription ID is required.', 'acf-stripe-subscription-field'));
+            }
+
+            $url = 'https://api.stripe.com/v1/subscriptions/' . rawurlencode($subscription_id);
+            $url .= '?expand[]=customer&expand[]=items.data.plan&expand[]=items.data.price';
+
+            $response = $this->perform_stripe_get(
+                $url,
+                $secret_key
+            );
+
+            return $this->maybe_decode_stripe_response($response, __('Unable to retrieve the subscription from Stripe.', 'acf-stripe-subscription-field'));
+        }
+
+        public function format_subscription_label($subscription)
+        {
+            $plan   = $this->extract_subscription_plan_name($subscription);
+            $status = isset($subscription['status']) ? $subscription['status'] : '';
+            $id     = isset($subscription['id']) ? $subscription['id'] : '';
+
+            if ($plan) {
+                return $status ? sprintf('%1$s (%2$s)', $plan, $status) : $plan;
+            }
+
+            if ($status && $id) {
+                return sprintf('%1$s (%2$s)', $id, $status);
+            }
+
+            if ($status) {
+                return $status;
+            }
+
+            return $id ? $id : __('Unknown subscription', 'acf-stripe-subscription-field');
+        }
+
+        protected function extract_subscription_plan_name($subscription)
+        {
+            if (!is_array($subscription)) {
+                return '';
+            }
+
+            if (!empty($subscription['plan']['nickname'])) {
+                return $subscription['plan']['nickname'];
+            }
+
+            if (!empty($subscription['plan']['id'])) {
+                return $subscription['plan']['id'];
+            }
+
+            if (!empty($subscription['items']['data'][0]['plan']['nickname'])) {
+                return $subscription['items']['data'][0]['plan']['nickname'];
+            }
+
+            if (!empty($subscription['items']['data'][0]['plan']['id'])) {
+                return $subscription['items']['data'][0]['plan']['id'];
+            }
+
+            if (!empty($subscription['items']['data'][0]['price']['nickname'])) {
+                return $subscription['items']['data'][0]['price']['nickname'];
+            }
+
+            if (!empty($subscription['items']['data'][0]['price']['id'])) {
+                return $subscription['items']['data'][0]['price']['id'];
+            }
+
+            return '';
+        }
+
+        protected function extract_subscription_customer_details($subscription)
+        {
+            $customer_id    = '';
+            $customer_name  = '';
+            $customer_email = '';
+
+            if (isset($subscription['customer'])) {
+                if (is_array($subscription['customer'])) {
+                    $customer_id    = isset($subscription['customer']['id']) ? $subscription['customer']['id'] : '';
+                    $customer_name  = isset($subscription['customer']['name']) ? $subscription['customer']['name'] : '';
+                    $customer_email = isset($subscription['customer']['email']) ? $subscription['customer']['email'] : '';
+                } elseif (!empty($subscription['customer'])) {
+                    $customer_id = (string) $subscription['customer'];
+                }
+            }
+
+            return [$customer_id, $customer_name, $customer_email];
+        }
+
+        protected function prepare_subscription_item($subscription)
+        {
+            $label = $this->format_subscription_label($subscription);
+            $plan  = $this->extract_subscription_plan_name($subscription);
+            list($customer_id, $customer_name, $customer_email) = $this->extract_subscription_customer_details($subscription);
+
+            return [
+                'id'             => isset($subscription['id']) ? $subscription['id'] : '',
+                'text'           => $label,
+                'label'          => $label,
+                'plan'           => $plan,
+                'status'         => isset($subscription['status']) ? $subscription['status'] : '',
+                'customer_id'    => $customer_id,
+                'customer_name'  => $customer_name,
+                'customer_email' => $customer_email,
+                'name'           => $customer_name,
+                'email'          => $customer_email,
+            ];
         }
     }
 }
