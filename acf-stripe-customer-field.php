@@ -1,0 +1,416 @@
+<?php
+/**
+ * Plugin Name: ACF Stripe Customer Field
+ * Description: Adds a Stripe Customer select field type to Advanced Custom Fields.
+ * Version: 1.0.0
+ * Author: OpenAI Assistant
+ * Text Domain: acf-stripe-customer-field
+ */
+
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
+    class ACF_Stripe_Customer_Field_Plugin
+    {
+        const OPTION_PREFIX = 'acf_stripe_';
+        protected $path;
+        protected $url;
+
+        public function __construct()
+        {
+            $this->path = plugin_dir_path(__FILE__);
+            $this->url  = plugin_dir_url(__FILE__);
+
+            add_action('admin_menu', [$this, 'register_settings_page']);
+            add_action('admin_init', [$this, 'register_settings']);
+            add_action('acf/include_field_types', [$this, 'include_field'], 10, 1);
+            add_action('acf/register_fields', [$this, 'include_field'], 10, 1);
+            add_action('acf/input/admin_enqueue_scripts', [$this, 'enqueue_field_assets']);
+            add_action('admin_enqueue_scripts', [$this, 'enqueue_field_assets']);
+            add_action('wp_enqueue_scripts', [$this, 'enqueue_field_assets_frontend']);
+            add_action('wp_ajax_acf_stripe_search_customers', [$this, 'ajax_search_customers']);
+            add_action('wp_ajax_nopriv_acf_stripe_search_customers', [$this, 'ajax_search_customers']);
+            
+            // Debug: Log plugin initialization
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('ACF Stripe Customer Field Plugin initialized');
+                $secret_key = $this->get_secret_key();
+                error_log('ACF Stripe: API key configured: ' . (!empty($secret_key) ? 'YES (length: ' . strlen($secret_key) . ')' : 'NO'));
+            }
+        }
+
+        public function include_field($version = false)
+        {
+            if (!class_exists('acf_field')) {
+                if (defined('WP_DEBUG') && WP_DEBUG) {
+                    error_log('ACF Stripe Customer Field: acf_field class not found');
+                }
+                return;
+            }
+            
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('ACF Stripe Customer Field: Registering field type');
+            }
+            
+            require_once $this->path . 'includes/class-acf-field-stripe-customer.php';
+            new ACF_Field_Stripe_Customer($this);
+        }
+
+        public function enqueue_field_assets()
+        {
+            wp_enqueue_script('select2');
+            wp_enqueue_style('select2');
+            
+            wp_register_style('acf-stripe-customer-field', $this->url . 'assets/css/stripe-customer-field.css', [], '1.0.0');
+            wp_enqueue_style('acf-stripe-customer-field');
+            
+            wp_register_script('acf-stripe-customer-field', $this->url . 'assets/js/stripe-customer-field.js', ['jquery', 'acf-input', 'select2'], '1.0.1', true);
+            wp_localize_script('acf-stripe-customer-field', 'acfStripeCustomerField', [
+                'ajaxUrl' => admin_url('admin-ajax.php'),
+                'nonce' => wp_create_nonce('acf_stripe_customer_search'),
+                'isConnected' => $this->is_connected(),
+                'debug' => defined('WP_DEBUG') && WP_DEBUG,
+                'strings' => [
+                    'placeholder' => __('Select a Stripe customer', 'acf-stripe-customer-field'),
+                    'noConnection' => __('Connect your Stripe account to search for customers.', 'acf-stripe-customer-field'),
+                    'noResults' => __('No customers found.', 'acf-stripe-customer-field'),
+                    'error' => __('Unable to load customers.', 'acf-stripe-customer-field'),
+                ],
+            ]);
+            wp_enqueue_script('acf-stripe-customer-field');
+        }
+
+        public function enqueue_field_assets_frontend()
+        {
+            if (function_exists('acf_form_head') || isset($_GET['acf_form'])) {
+                $this->enqueue_field_assets();
+            }
+        }
+
+        public function ajax_search_customers()
+        {
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('ACF Stripe Customer AJAX request started');
+                error_log('Request data: ' . print_r($_REQUEST, true));
+            }
+
+            if (!wp_verify_nonce($_REQUEST['nonce'], 'acf_stripe_customer_search')) {
+                if (defined('WP_DEBUG') && WP_DEBUG) {
+                    error_log('ACF Stripe Customer AJAX: Nonce verification failed');
+                }
+                wp_send_json_error(['message' => __('Security check failed.', 'acf-stripe-customer-field')], 403);
+            }
+
+            if (!current_user_can('edit_posts')) {
+                if (defined('WP_DEBUG') && WP_DEBUG) {
+                    error_log('ACF Stripe Customer AJAX: Permission check failed');
+                }
+                wp_send_json_error(['message' => __('You do not have permission to perform this request.', 'acf-stripe-customer-field')], 403);
+            }
+
+            $secret_key = $this->get_secret_key();
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log(sprintf('ACF Stripe Customer AJAX request — secret length: %d, connected: %s', strlen($secret_key), $this->is_connected() ? 'yes' : 'no'));
+            }
+
+            if ('' === $secret_key) {
+                wp_send_json_error(['message' => __('Stripe secret key is missing.', 'acf-stripe-customer-field')], 400);
+            }
+
+            $request = wp_unslash($_REQUEST);
+            $search = isset($request['search']) ? sanitize_text_field($request['search']) : '';
+
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('ACF Stripe Customer AJAX: Searching for: ' . $search);
+            }
+
+            // If searching for a specific customer ID, fetch that customer directly
+            if (!empty($search) && preg_match('/^cus_[a-zA-Z0-9]+$/', $search)) {
+                if (defined('WP_DEBUG') && WP_DEBUG) {
+                    error_log('ACF Stripe Customer AJAX: Fetching specific customer: ' . $search);
+                }
+                
+                $customer = $this->fetch_customer($search, $secret_key);
+                if (is_wp_error($customer)) {
+                    if (defined('WP_DEBUG') && WP_DEBUG) {
+                        error_log('ACF Stripe Customer AJAX: Customer fetch error: ' . $customer->get_error_message());
+                    }
+                    wp_send_json_error(['message' => $customer->get_error_message()], 500);
+                }
+                
+                // Format single customer as items array
+                $items = [[
+                    'id' => $customer['id'],
+                    'text' => $this->format_customer_label($customer),
+                    'email' => isset($customer['email']) ? $customer['email'] : '',
+                    'name' => isset($customer['name']) ? $customer['name'] : '',
+                ]];
+                
+                if (defined('WP_DEBUG') && WP_DEBUG) {
+                    error_log('ACF Stripe Customer AJAX: Returning single customer: ' . $customer['id']);
+                }
+                
+                wp_send_json_success(['items' => $items, 'more' => false]);
+            }
+
+            $customers = $this->fetch_customers($search, $secret_key);
+            if (is_wp_error($customers)) {
+                if (defined('WP_DEBUG') && WP_DEBUG) {
+                    error_log('ACF Stripe Customer AJAX: Stripe API error: ' . $customers->get_error_message());
+                }
+                wp_send_json_error(['message' => $customers->get_error_message()], 500);
+            }
+
+            $items = [];
+            if (!empty($customers['data']) && is_array($customers['data'])) {
+                foreach ($customers['data'] as $customer) {
+                    $items[] = [
+                        'id' => $customer['id'],
+                        'text' => $this->format_customer_label($customer),
+                        'email' => isset($customer['email']) ? $customer['email'] : '',
+                        'name' => isset($customer['name']) ? $customer['name'] : '',
+                    ];
+                }
+            }
+
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('ACF Stripe Customer AJAX: Returning ' . count($items) . ' customers');
+            }
+
+            wp_send_json_success(['items' => $items, 'more' => false]);
+        }
+
+        public function fetch_customers($search = '', $secret_key = null)
+        {
+            $secret_key = null === $secret_key ? $this->get_secret_key() : $secret_key;
+
+            if (empty($secret_key)) {
+                return new WP_Error('acf_stripe_missing_token', __('Stripe secret key is missing.', 'acf-stripe-customer-field'));
+            }
+
+            $endpoint = 'https://api.stripe.com/v1/customers';
+            $args = ['limit' => 20];
+
+            if (!empty($search)) {
+                $search_value = $this->prepare_search_query($search);
+                if ($search_value) {
+                    $endpoint = 'https://api.stripe.com/v1/customers/search';
+                    $args['query'] = $search_value;
+                }
+            }
+
+            $response = $this->perform_stripe_get(add_query_arg($args, $endpoint), $secret_key);
+            $body = $this->maybe_decode_stripe_response($response, __('Unable to retrieve customers from Stripe.', 'acf-stripe-customer-field'));
+
+            return $body;
+        }
+
+        protected function prepare_search_query($search)
+        {
+            $term = trim($search);
+            if ('' === $term) {
+                return '';
+            }
+            
+            // If searching for a specific customer ID (starts with cus_), search by ID
+            if (preg_match('/^cus_[a-zA-Z0-9]+$/', $term)) {
+                return sprintf("id:'%s'", $term);
+            }
+            
+            // Otherwise search by name/email
+            $term = preg_replace('/[^a-zA-Z0-9@._\\-\\s]/', '', $term);
+            $term = substr($term, 0, 50);
+            $term = trim($term);
+            if ('' === $term) {
+                return '';
+            }
+            return sprintf("name:'%1\$s*' OR email:'%1\$s*'", $term);
+        }
+
+        public function format_customer_label($customer)
+        {
+            $name = isset($customer['name']) ? $customer['name'] : '';
+            $email = isset($customer['email']) ? $customer['email'] : '';
+
+            if ($name && $email) {
+                return sprintf('%1$s (%2$s)', $name, $email);
+            }
+            if ($name) {
+                return $name;
+            }
+            if ($email) {
+                return $email;
+            }
+            return isset($customer['id']) ? $customer['id'] : __('Unknown customer', 'acf-stripe-customer-field');
+        }
+
+        protected function perform_stripe_get($url, $secret_key)
+        {
+            return wp_remote_get($url, [
+                'timeout' => 20,
+                'headers' => $this->get_api_request_headers($secret_key),
+            ]);
+        }
+
+        protected function maybe_decode_stripe_response($response, $fallback_message)
+        {
+            if (is_wp_error($response)) {
+                return new WP_Error('acf_stripe_request_failed', $response->get_error_message());
+            }
+
+            $body = json_decode(wp_remote_retrieve_body($response), true);
+
+            if (empty($body) || isset($body['error'])) {
+                $message = isset($body['error']['message']) ? $body['error']['message'] : $fallback_message;
+                return new WP_Error('acf_stripe_invalid_response', $message);
+            }
+
+            return $body;
+        }
+
+        public function is_connected()
+        {
+            return !empty($this->get_secret_key());
+        }
+
+        protected function get_secret_key()
+        {
+            $secret_key = $this->get_option('secret_key');
+            if (empty($secret_key) && defined('ACF_STRIPE_CUSTOMER_SECRET_KEY')) {
+                $secret_key = (string) constant('ACF_STRIPE_CUSTOMER_SECRET_KEY');
+            }
+            return apply_filters('acf_stripe_customer_field/secret_key', $secret_key);
+        }
+
+        protected function get_api_request_headers($secret_key)
+        {
+            $headers = [
+                'Authorization' => 'Bearer ' . $secret_key,
+                'Stripe-Version' => '2022-11-15',
+                'User-Agent' => 'ACFStripeCustomerField/1.0; WordPress/' . get_bloginfo('version'),
+            ];
+            return apply_filters('acf_stripe_customer_field/api_request_headers', $headers, $secret_key);
+        }
+
+        public function get_option($key)
+        {
+            return get_option(self::OPTION_PREFIX . $key);
+        }
+
+        public function update_option($key, $value)
+        {
+            update_option(self::OPTION_PREFIX . $key, $value);
+        }
+
+        public function register_settings()
+        {
+            register_setting('acf_stripe_settings', self::OPTION_PREFIX . 'secret_key', [
+                'type' => 'string',
+                'sanitize_callback' => [$this, 'sanitize_text'],
+            ]);
+        }
+
+        public function sanitize_text($value)
+        {
+            return sanitize_text_field($value);
+        }
+
+        public function register_settings_page()
+        {
+            $capability = $this->get_admin_capability();
+
+            if ($this->is_acf_admin_available()) {
+                add_submenu_page(
+                    'edit.php?post_type=acf-field-group',
+                    __('Stripe Customers', 'acf-stripe-customer-field'),
+                    __('Stripe Customers', 'acf-stripe-customer-field'),
+                    $capability,
+                    'acf-stripe-customer-field',
+                    [$this, 'render_settings_page']
+                );
+                return;
+            }
+
+            add_options_page(
+                __('ACF Stripe Customer', 'acf-stripe-customer-field'),
+                __('ACF Stripe Customer', 'acf-stripe-customer-field'),
+                $capability,
+                'acf-stripe-customer-field',
+                [$this, 'render_settings_page']
+            );
+        }
+
+        public function render_settings_page()
+        {
+            if (!current_user_can($this->get_admin_capability())) {
+                return;
+            }
+
+            $secret_key = $this->get_secret_key();
+            $is_connected = !empty($secret_key);
+            ?>
+            <div class="wrap">
+                <h1><?php esc_html_e('Stripe Customers', 'acf-stripe-customer-field'); ?></h1>
+                <?php settings_errors('acf_stripe_settings'); ?>
+
+                <h2><?php esc_html_e('Connection Status', 'acf-stripe-customer-field'); ?></h2>
+                <?php if ($is_connected) : ?>
+                    <p><?php esc_html_e('Stripe requests will use the secret key saved below.', 'acf-stripe-customer-field'); ?></p>
+                <?php else : ?>
+                    <p><?php esc_html_e('Enter your Stripe secret key to allow the field to load customers.', 'acf-stripe-customer-field'); ?></p>
+                <?php endif; ?>
+
+                <h2><?php esc_html_e('Stripe API Credentials', 'acf-stripe-customer-field'); ?></h2>
+                <p class="description"><?php esc_html_e('Paste a restricted or full-access secret key that can read customers.', 'acf-stripe-customer-field'); ?></p>
+                <form method="post" action="options.php">
+                    <?php settings_fields('acf_stripe_settings'); ?>
+                    <table class="form-table" role="presentation">
+                        <tbody>
+                        <tr>
+                            <th scope="row">
+                                <label for="acf-stripe-secret-key"><?php esc_html_e('Stripe Secret Key', 'acf-stripe-customer-field'); ?></label>
+                            </th>
+                            <td>
+                                <input name="<?php echo esc_attr(self::OPTION_PREFIX . 'secret_key'); ?>" id="acf-stripe-secret-key" type="password" class="regular-text" value="<?php echo esc_attr($secret_key); ?>" autocomplete="off" />
+                                <p class="description"><?php esc_html_e('Example: sk_live_...', 'acf-stripe-customer-field'); ?></p>
+                            </td>
+                        </tr>
+                        </tbody>
+                    </table>
+                    <?php submit_button(); ?>
+                </form>
+            </div>
+            <?php
+        }
+
+        public function get_settings_menu_hint()
+        {
+            if ($this->is_acf_admin_available()) {
+                return __('Custom Fields → Stripe Customers', 'acf-stripe-customer-field');
+            }
+
+            return __('Settings → ACF Stripe Customer', 'acf-stripe-customer-field');
+        }
+
+        protected function get_admin_capability()
+        {
+            if (function_exists('acf_get_setting')) {
+                $capability = acf_get_setting('capability');
+                if (!empty($capability)) {
+                    return $capability;
+                }
+            }
+            return 'manage_options';
+        }
+
+        protected function is_acf_admin_available()
+        {
+            return post_type_exists('acf-field-group');
+        }
+    }
+}
+
+// Bootstrap the plugin.
+new ACF_Stripe_Customer_Field_Plugin();

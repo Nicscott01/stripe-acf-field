@@ -1,0 +1,43 @@
+.acf-stripe-customer-field {
+    position: relative;
+}
+
+.acf-stripe-customer-field .acf-stripe-customer-notice {
+    margin: 5px 0;
+    padding: 8px 12px;
+    background: #fff3cd;
+    border: 1px solid #ffeaa7;
+    border-radius: 4px;
+    color: #856404;
+}
+
+.acf-stripe-customer-field .acf-stripe-customer-select {
+    width: 100%;
+}
+
+.acf-stripe-customer-option {
+    padding: 2px 0;
+}
+
+.acf-stripe-customer-option .customer-name {
+    font-weight: 600;
+    font-size: 14px;
+    color: #333;
+}
+
+.acf-stripe-customer-option .customer-email {
+    font-size: 13px;
+    color: #666;
+    font-style: italic;
+}
+
+.acf-stripe-customer-option .customer-id {
+    font-size: 11px;
+    color: #999;
+    font-family: monospace;
+}
+
+.acf-stripe-customer-field select[disabled] {
+    background-color: #f1f1f1;
+    color: #999;
+}
