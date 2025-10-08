@@ -78,23 +78,27 @@ if (!class_exists('ACF_Field_Stripe_Customer') && class_exists('acf_field')) {
      */
     public function render_field($field)
     {
-        $value       = isset($field['value']) ? $field['value'] : '';
-        $value       = is_array($value) ? '' : $value;
+        $raw_value = isset($field['value']) ? $field['value'] : '';
+        
+        // Debug logging
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+            error_log('ACF Stripe Customer render_field - Raw field value: ' . print_r($raw_value, true));
+            error_log('ACF Stripe Customer render_field - Field structure: ' . print_r($field, true));
+        }
+        
+        $customer_data = $this->parse_customer_value($raw_value);
+        $customer_id = $customer_data['id'];
+        $selected_label = $customer_data['label'];
+        
+        // Debug logging
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+            error_log('ACF Stripe Customer render_field - Parsed data: ' . print_r($customer_data, true));
+            error_log('ACF Stripe Customer render_field - Selected label: ' . $selected_label);
+        }
+        
         $placeholder = !empty($field['placeholder']) ? $field['placeholder'] : __('Select a Stripe customer', 'acf-stripe-customer-field');
         $allow_null  = !empty($field['allow_null']);
         $connected   = $this->plugin->is_connected();
-        $selected_label = '';
-
-        if ($value && $connected) {
-            if (method_exists($this->plugin, 'fetch_customer')) {
-                $customer = $this->plugin->fetch_customer($value);
-            } else {
-                $customer = new WP_Error('no_method', __('Method fetch_customer does not exist', 'acf-stripe-customer-field'));
-            }
-            if (!is_wp_error($customer)) {
-                $selected_label = $this->plugin->format_customer_label($customer);
-            }
-        }
 
         $select_attributes = [
             'class'            => 'acf-stripe-customer-select',
@@ -128,24 +132,203 @@ if (!class_exists('ACF_Field_Stripe_Customer') && class_exists('acf_field')) {
             echo '<option value=""></option>';
         }
 
-        if ($value) {
-            printf('<option value="%1$s" selected="selected">%2$s</option>', esc_attr($value), esc_html($selected_label ? $selected_label : $value));
+        if ($customer_id) {
+            printf('<option value="%1$s" selected="selected">%2$s</option>', esc_attr($customer_id), esc_html($selected_label ? $selected_label : $customer_id));
         }
 
         echo '</select>';
         
+        // Store customer data in hidden field for JavaScript access
+        if ($customer_data['name'] || $customer_data['email']) {
+            printf(
+                '<input type="hidden" name="%s_data" value="%s" />',
+                esc_attr($field['name']),
+                esc_attr(json_encode([
+                    'id' => $customer_data['id'],
+                    'name' => $customer_data['name'],
+                    'email' => $customer_data['email']
+                ]))
+            );
+        }
+        
         // Add debug information when WP_DEBUG is enabled
         if (defined('WP_DEBUG') && WP_DEBUG) {
             printf(
-                '<!-- ACF Stripe Customer Field Debug: Connected=%s, Value=%s, Label=%s -->',
+                '<!-- ACF Stripe Customer Field Debug: Connected=%s, ID=%s, Label=%s, Data=%s -->',
                 $connected ? 'true' : 'false',
-                esc_attr($value),
-                esc_attr($selected_label)
+                esc_attr($customer_id),
+                esc_attr($selected_label),
+                esc_attr(json_encode($customer_data))
             );
         }
 
         echo '</div>';
-    }        /**
+    }
+
+        /**
+         * Load value from database for display in the field.
+         *
+         * @param mixed $value The raw value from database.
+         * @param int   $post_id Post ID.
+         * @param array $field Field array.
+         * @return mixed
+         */
+        public function load_value($value, $post_id, $field)
+        {
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('ACF Stripe Customer load_value - Raw from DB: ' . print_r($value, true));
+            }
+
+            // If the value is an array (our new format), extract just the ID for the form field
+            if (is_array($value) && isset($value['id'])) {
+                if (defined('WP_DEBUG') && WP_DEBUG) {
+                    error_log('ACF Stripe Customer load_value - Returning ID: ' . $value['id']);
+                }
+                return $value['id'];
+            }
+
+            // If it's already a string (legacy format), return as-is
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('ACF Stripe Customer load_value - Returning as-is: ' . print_r($value, true));
+            }
+            
+            return $value;
+        }
+
+        /**
+         * Parse customer value from database.
+         *
+         * @param mixed $value Raw value from database.
+         * @return array Customer data array.
+         */
+        protected function parse_customer_value($value)
+        {
+            $default = [
+                'id' => '',
+                'name' => '',
+                'email' => '',
+                'label' => ''
+            ];
+
+            if (empty($value)) {
+                return $default;
+            }
+
+            // If it's already an array (new format), use it
+            if (is_array($value) && isset($value['id'])) {
+                $customer_data = array_merge($default, $value);
+                $customer_data['label'] = $this->format_customer_label_from_data($customer_data);
+                return $customer_data;
+            }
+
+            // If it's a JSON string, decode it first
+            if (is_string($value) && !empty($value)) {
+                $decoded = json_decode($value, true);
+                if (json_last_error() === JSON_ERROR_NONE && is_array($decoded) && isset($decoded['id'])) {
+                    // It's a JSON string with customer data
+                    $customer_data = array_merge($default, $decoded);
+                    $customer_data['label'] = $this->format_customer_label_from_data($customer_data);
+                    return $customer_data;
+                }
+                
+                // If it's not JSON or doesn't decode properly, treat as customer ID
+                return [
+                    'id' => $value,
+                    'name' => '',
+                    'email' => '',
+                    'label' => $value // Use ID as fallback label
+                ];
+            }
+
+            return $default;
+        }
+
+        /**
+         * Format customer label from stored data.
+         *
+         * @param array $customer_data Customer data array.
+         * @return string Formatted label.
+         */
+        protected function format_customer_label_from_data($customer_data)
+        {
+            $name = isset($customer_data['name']) ? $customer_data['name'] : '';
+            $email = isset($customer_data['email']) ? $customer_data['email'] : '';
+
+            if ($name && $email) {
+                return sprintf('%1$s (%2$s)', $name, $email);
+            }
+
+            if ($name) {
+                return $name;
+            }
+
+            if ($email) {
+                return $email;
+            }
+
+            return isset($customer_data['id']) ? $customer_data['id'] : __('Unknown customer', 'acf-stripe-customer-field');
+        }
+
+        /**
+         * Process value before saving to database.
+         *
+         * @param mixed $value The field value.
+         * @param int   $post_id Post ID.
+         * @param array $field Field array.
+         * @return mixed
+         */
+        public function update_value($value, $post_id, $field)
+        {
+            // If no value, return empty
+            if (empty($value)) {
+                return '';
+            }
+
+            // If it's already our expected format, return as-is
+            if (is_array($value) && isset($value['id'])) {
+                return $value;
+            }
+
+            // If it's just a customer ID string, we need to enrich it
+            // This happens when the form submits just the customer ID
+            if (is_string($value) && preg_match('/^cus_[a-zA-Z0-9]+$/', $value)) {
+                // Check if we have additional data from the hidden field
+                $data_field_name = $field['name'] . '_data';
+                if (isset($_POST[$data_field_name])) {
+                    $posted_data = json_decode(stripslashes($_POST[$data_field_name]), true);
+                    if (is_array($posted_data) && $posted_data['id'] === $value) {
+                        return [
+                            'id' => $value,
+                            'name' => $posted_data['name'] ?? '',
+                            'email' => $posted_data['email'] ?? ''
+                        ];
+                    }
+                }
+
+                // Fallback: try to fetch customer data from Stripe
+                if ($this->plugin->is_connected()) {
+                    $customer = $this->plugin->fetch_customer($value);
+                    if (!is_wp_error($customer)) {
+                        return [
+                            'id' => $customer['id'],
+                            'name' => $customer['name'] ?? '',
+                            'email' => $customer['email'] ?? ''
+                        ];
+                    }
+                }
+
+                // Last resort: store just the ID
+                return [
+                    'id' => $value,
+                    'name' => '',
+                    'email' => ''
+                ];
+            }
+
+            return $value;
+        }
+
+        /**
          * Format the value when loaded from the database.
          *
          * @param mixed  $value   The raw value.
@@ -160,21 +343,32 @@ if (!class_exists('ACF_Field_Stripe_Customer') && class_exists('acf_field')) {
             }
 
             $return_format = isset($field['return_format']) ? $field['return_format'] : 'id';
+            $customer_data = $this->parse_customer_value($value);
 
-            if ('object' !== $return_format) {
-                return $value;
-            }
+            if ('object' === $return_format) {
+                // For object format, try to return enriched data or fetch from API
+                if (!empty($customer_data['name']) || !empty($customer_data['email'])) {
+                    // We have cached data, return it as object-like array
+                    return [
+                        'id' => $customer_data['id'],
+                        'name' => $customer_data['name'],
+                        'email' => $customer_data['email']
+                    ];
+                }
 
-            if (!$this->plugin->is_connected()) {
+                // Try to fetch from Stripe API as fallback
+                if ($this->plugin->is_connected() && !empty($customer_data['id'])) {
+                    $customer = $this->plugin->fetch_customer($customer_data['id']);
+                    if (!is_wp_error($customer)) {
+                        return $customer;
+                    }
+                }
+
                 return null;
             }
 
-            $customer = $this->plugin->fetch_customer($value);
-            if (is_wp_error($customer)) {
-                return null;
-            }
-
-            return $customer;
+            // Default: return just the customer ID
+            return $customer_data['id'];
         }
     }
 }

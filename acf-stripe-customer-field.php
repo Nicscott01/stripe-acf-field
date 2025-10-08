@@ -207,6 +207,36 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
             return $body;
         }
 
+        /**
+         * Fetch a single customer from Stripe.
+         *
+         * @param string $customer_id Customer ID.
+         * @param string $secret_key Stripe secret key.
+         * @return array|WP_Error
+         */
+        public function fetch_customer($customer_id, $secret_key = null)
+        {
+            $secret_key = null === $secret_key ? $this->get_secret_key() : $secret_key;
+
+            if (empty($secret_key)) {
+                return new WP_Error('acf_stripe_missing_token', __('Stripe secret key is missing.', 'acf-stripe-customer-field'));
+            }
+
+            $customer_id = trim($customer_id);
+            if ('' === $customer_id) {
+                return new WP_Error('acf_stripe_missing_customer', __('Customer ID is required.', 'acf-stripe-customer-field'));
+            }
+
+            $response = $this->perform_stripe_get(
+                'https://api.stripe.com/v1/customers/' . rawurlencode($customer_id),
+                $secret_key
+            );
+
+            $body = $this->maybe_decode_stripe_response($response, __('Unable to retrieve the customer from Stripe.', 'acf-stripe-customer-field'));
+
+            return $body;
+        }
+
         protected function prepare_search_query($search)
         {
             $term = trim($search);

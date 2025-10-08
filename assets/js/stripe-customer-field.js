@@ -160,7 +160,16 @@
                         // Add customer options
                         response.data.items.forEach(function(customer) {
                             var selected = customer.id === selectedValue ? ' selected' : '';
-                            $select.append('<option value="' + customer.id + '"' + selected + '>' + customer.text + '</option>');
+                            var $option = $('<option value="' + customer.id + '"' + selected + '>' + customer.text + '</option>');
+                            
+                            // Store customer data in the option for later use
+                            $option.data('customer-data', {
+                                id: customer.id,
+                                name: customer.name || '',
+                                email: customer.email || ''
+                            });
+                            
+                            $select.append($option);
                         });
                         
                         $select.data('customers-loaded', true);
@@ -177,54 +186,100 @@
             });
         });
 
+        // Update hidden data field when selection changes
+        $select.on('change', function() {
+            var selectedValue = $(this).val();
+            var hiddenDataField = $field.find('input[name="' + $(this).attr('name') + '_data"]');
+            
+            if (selectedValue && selectedValue !== '') {
+                var selectedOption = $(this).find('option:selected');
+                var customerData = selectedOption.data('customer-data');
+                
+                if (customerData) {
+                    // Create or update hidden field with customer data
+                    if (hiddenDataField.length === 0) {
+                        hiddenDataField = $('<input type="hidden" name="' + $(this).attr('name') + '_data" />');
+                        $field.append(hiddenDataField);
+                    }
+                    
+                    hiddenDataField.val(JSON.stringify(customerData));
+                    console.log('Updated hidden field with customer data:', customerData);
+                } else {
+                    console.warn('No customer data available for selected option');
+                }
+            } else {
+                // Clear hidden field if no selection
+                if (hiddenDataField.length > 0) {
+                    hiddenDataField.remove();
+                }
+            }
+        });
+
         // Handle initial value if already selected
         var initialValue = $select.val();
+        
+        // Handle case where initialValue might be JSON object instead of customer ID
+        if (initialValue && typeof initialValue === 'object') {
+            console.warn('Initial value is an object, extracting customer ID:', initialValue);
+            if (initialValue.id) {
+                initialValue = initialValue.id;
+                $select.val(initialValue); // Update the select with just the ID
+            }
+        }
+        
         if (initialValue && initialValue !== '') {
             var displayText = $select.data('selected-text');
             console.log('Field has initial value:', initialValue, 'with text:', displayText);
             
-            // If we have display text, create the option
-            if (displayText) {
-                // Make sure the option exists with the correct text
+            // Check if we have cached customer data in a hidden field
+            var hiddenDataField = $field.find('input[name="' + $select.attr('name') + '_data"]');
+            var cachedData = null;
+            
+            if (hiddenDataField.length) {
+                try {
+                    cachedData = JSON.parse(hiddenDataField.val());
+                    console.log('Found cached customer data:', cachedData);
+                } catch (e) {
+                    console.warn('Could not parse cached customer data');
+                }
+            }
+            
+            // If we have cached data, use it
+            if (cachedData && cachedData.id === initialValue) {
+                var cachedDisplayText = '';
+                if (cachedData.name && cachedData.email) {
+                    cachedDisplayText = cachedData.name + ' (' + cachedData.email + ')';
+                } else if (cachedData.name) {
+                    cachedDisplayText = cachedData.name;
+                } else if (cachedData.email) {
+                    cachedDisplayText = cachedData.email;
+                } else {
+                    cachedDisplayText = cachedData.id;
+                }
+                
+                // Update the option with cached data
+                if (!$select.find('option[value="' + initialValue + '"]').length) {
+                    $select.append('<option value="' + initialValue + '" selected="selected">' + cachedDisplayText + '</option>');
+                } else {
+                    $select.find('option[value="' + initialValue + '"]').text(cachedDisplayText).attr('selected', 'selected');
+                }
+                
+                console.log('Used cached data for initial value, no API call needed');
+            }
+            // If we have display text from server, use it
+            else if (displayText && displayText !== initialValue) {
                 if (!$select.find('option[value="' + initialValue + '"]').length) {
                     $select.append('<option value="' + initialValue + '" selected="selected">' + displayText + '</option>');
                 } else {
-                    // Update existing option text
                     $select.find('option[value="' + initialValue + '"]').text(displayText).attr('selected', 'selected');
                 }
-            } else if (initialValue !== '') {
-                // We have a value but no display text - fetch customer details
-                console.log('Fetching customer details for initial value:', initialValue);
                 
-                $.ajax({
-                    url: acfStripeCustomerField.ajaxUrl,
-                    type: 'POST',
-                    data: {
-                        action: 'acf_stripe_search_customers',
-                        nonce: acfStripeCustomerField.nonce,
-                        search: initialValue, // Search for the specific customer ID
-                        page: 1
-                    },
-                    success: function(response) {
-                        if (response.success && response.data && response.data.items) {
-                            var customer = response.data.items.find(function(c) { return c.id === initialValue; });
-                            if (customer) {
-                                console.log('Found customer for initial value:', customer);
-                                $select.find('option[value="' + initialValue + '"]').text(customer.text);
-                                $select.trigger('change.select2');
-                            } else {
-                                console.warn('Customer not found in search results');
-                                // Keep the customer ID as display text for now
-                                $select.find('option[value="' + initialValue + '"]').text(initialValue);
-                            }
-                        }
-                    },
-                    error: function() {
-                        console.warn('Could not fetch customer details for initial value');
-                        // Keep the customer ID as display text
-                        $select.find('option[value="' + initialValue + '"]').text(initialValue);
-                    }
-                });
+                console.log('Used server-provided display text, no API call needed');
+            }
+            // Last resort: we have a value but no display text - this should rarely happen now
+            else if (initialValue !== '') {
+                console.warn('No cached data or display text available, using customer ID as fallback');
+                $select.find('option[value="' + initialValue + '"]').text(initialValue);
             }
         }
     }
