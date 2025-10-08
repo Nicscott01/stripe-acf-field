@@ -86,7 +86,11 @@ if (!class_exists('ACF_Field_Stripe_Customer') && class_exists('acf_field')) {
         $selected_label = '';
 
         if ($value && $connected) {
-            $customer = $this->plugin->fetch_customer($value);
+            if (method_exists($this->plugin, 'fetch_customer')) {
+                $customer = $this->plugin->fetch_customer($value);
+            } else {
+                $customer = new WP_Error('no_method', __('Method fetch_customer does not exist', 'acf-stripe-customer-field'));
+            }
             if (!is_wp_error($customer)) {
                 $selected_label = $this->plugin->format_customer_label($customer);
             }
