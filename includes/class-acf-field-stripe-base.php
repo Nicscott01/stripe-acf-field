@@ -171,8 +171,14 @@ if (!class_exists('ACF_Field_Stripe_Base') && class_exists('acf_field')) {
 
             if (!$connected) {
                 $hint = $this->plugin->get_settings_menu_hint();
+                $notice_class = sprintf(
+                    'description acf-stripe-notice acf-stripe-%s-notice',
+                    esc_attr(str_replace('_', '-', $this->get_stripe_object_type()))
+                );
+
                 printf(
-                    '<p class="description acf-stripe-notice" style="color: #d63638;">%s</p>',
+                    '<p class="%1$s" style="color: #d63638;">%2$s</p>',
+                    $notice_class,
                     esc_html(sprintf(__('Connect your Stripe account from %s to load %s.', 'acf-stripe-field'), $hint, strtolower($object_name) . 's'))
                 );
             }

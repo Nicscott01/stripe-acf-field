@@ -40,6 +40,8 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
             add_action('wp_ajax_nopriv_acf_stripe_search_customers', [$this, 'ajax_search_customers']);
             add_action('wp_ajax_acf_stripe_search_subscriptions', [$this, 'ajax_search_subscriptions']);
             add_action('wp_ajax_nopriv_acf_stripe_search_subscriptions', [$this, 'ajax_search_subscriptions']);
+            add_action('wp_ajax_acf_stripe_search_products', [$this, 'ajax_search_products']);
+            add_action('wp_ajax_nopriv_acf_stripe_search_products', [$this, 'ajax_search_products']);
 
             // Debug: Log plugin initialization
             if (defined('WP_DEBUG') && WP_DEBUG) {
@@ -64,8 +66,10 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
             require_once $this->path . 'includes/class-acf-field-stripe-base.php';
             require_once $this->path . 'includes/class-acf-field-stripe-customer.php';
             require_once $this->path . 'includes/class-acf-field-stripe-subscription.php';
+            require_once $this->path . 'includes/class-acf-field-stripe-product.php';
             new ACF_Field_Stripe_Customer($this);
             new ACF_Field_Stripe_Subscription($this);
+            new ACF_Field_Stripe_Product($this);
         }
 
         public function enqueue_field_assets()
@@ -108,6 +112,22 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
                 ],
             ]);
             wp_enqueue_script('acf-stripe-subscription-field');
+
+            wp_register_script('acf-stripe-product-field', $this->url . 'assets/js/stripe-product-field.js', ['jquery', 'acf-input', 'select2', 'acf-stripe-field-base'], '1.0.0', true);
+            wp_localize_script('acf-stripe-product-field', 'acfStripeProductField', [
+                'ajaxUrl'    => admin_url('admin-ajax.php'),
+                'nonce'      => wp_create_nonce('acf_stripe_product_search'),
+                'isConnected'=> $this->is_connected(),
+                'debug'      => defined('WP_DEBUG') && WP_DEBUG,
+                'strings'    => [
+                    'placeholder'  => __('Select a Stripe product', 'acf-stripe-product-field'),
+                    'noConnection' => __('Connect your Stripe account to search for products.', 'acf-stripe-product-field'),
+                    'noResults'    => __('No products found.', 'acf-stripe-product-field'),
+                    'error'        => __('Unable to load products.', 'acf-stripe-product-field'),
+                    'inactive'     => __('inactive', 'acf-stripe-product-field'),
+                ],
+            ]);
+            wp_enqueue_script('acf-stripe-product-field');
         }
 
         public function enqueue_field_assets_frontend()
@@ -583,6 +603,108 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
             wp_send_json_success(['items' => $items, 'more' => false]);
         }
 
+        public function ajax_search_products()
+        {
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('ACF Stripe Product AJAX request started');
+                error_log('Request data: ' . print_r($_REQUEST, true));
+            }
+
+            if (!wp_verify_nonce($_REQUEST['nonce'], 'acf_stripe_product_search')) {
+                if (defined('WP_DEBUG') && WP_DEBUG) {
+                    error_log('ACF Stripe Product AJAX: Nonce verification failed');
+                }
+                wp_send_json_error(['message' => __('Security check failed.', 'acf-stripe-product-field')], 403);
+            }
+
+            if (!current_user_can('edit_posts')) {
+                if (defined('WP_DEBUG') && WP_DEBUG) {
+                    error_log('ACF Stripe Product AJAX: Permission check failed');
+                }
+                wp_send_json_error(['message' => __('You do not have permission to perform this request.', 'acf-stripe-product-field')], 403);
+            }
+
+            $secret_key = $this->get_secret_key();
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log(sprintf('ACF Stripe Product AJAX request — secret length: %d, connected: %s', strlen($secret_key), $this->is_connected() ? 'yes' : 'no'));
+            }
+
+            if ('' === $secret_key) {
+                wp_send_json_error(['message' => __('Stripe secret key is missing.', 'acf-stripe-product-field')], 400);
+            }
+
+            $request = wp_unslash($_REQUEST);
+            $search  = isset($request['search']) ? sanitize_text_field($request['search']) : '';
+
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('ACF Stripe Product AJAX: Searching for: ' . $search);
+            }
+
+            if (!empty($search) && preg_match('/^prod_[a-zA-Z0-9]+$/', $search)) {
+                if (defined('WP_DEBUG') && WP_DEBUG) {
+                    error_log('ACF Stripe Product AJAX: Fetching specific product: ' . $search);
+                }
+
+                $product = $this->fetch_product($search, $secret_key);
+                if (is_wp_error($product)) {
+                    if (defined('WP_DEBUG') && WP_DEBUG) {
+                        error_log('ACF Stripe Product AJAX: Product fetch error: ' . $product->get_error_message());
+                    }
+                    wp_send_json_error(['message' => $product->get_error_message()], 500);
+                }
+
+                $normalized = $this->normalize_product_for_response($product);
+
+                $items = [[
+                    'id'             => $normalized['id'],
+                    'text'           => $this->format_product_label($normalized),
+                    'name'           => isset($normalized['name']) ? $normalized['name'] : '',
+                    'description'    => isset($normalized['description']) ? $normalized['description'] : '',
+                    'active'         => isset($normalized['active']) ? (bool) $normalized['active'] : false,
+                    'price_amount'   => isset($normalized['price_amount']) ? $normalized['price_amount'] : '',
+                    'price_currency' => isset($normalized['price_currency']) ? $normalized['price_currency'] : '',
+                    'price_interval' => isset($normalized['price_interval']) ? $normalized['price_interval'] : '',
+                ]];
+
+                if (defined('WP_DEBUG') && WP_DEBUG) {
+                    error_log('ACF Stripe Product AJAX: Returning single product: ' . $normalized['id']);
+                }
+
+                wp_send_json_success(['items' => $items, 'more' => false]);
+            }
+
+            $products = $this->fetch_products($search, $secret_key);
+            if (is_wp_error($products)) {
+                if (defined('WP_DEBUG') && WP_DEBUG) {
+                    error_log('ACF Stripe Product AJAX: Stripe API error: ' . $products->get_error_message());
+                }
+                wp_send_json_error(['message' => $products->get_error_message()], 500);
+            }
+
+            $items = [];
+            if (!empty($products['data']) && is_array($products['data'])) {
+                foreach ($products['data'] as $product) {
+                    $product = $this->normalize_product_for_response($product);
+                    $items[] = [
+                        'id'             => $product['id'],
+                        'text'           => $this->format_product_label($product),
+                        'name'           => isset($product['name']) ? $product['name'] : '',
+                        'description'    => isset($product['description']) ? $product['description'] : '',
+                        'active'         => isset($product['active']) ? (bool) $product['active'] : false,
+                        'price_amount'   => isset($product['price_amount']) ? $product['price_amount'] : '',
+                        'price_currency' => isset($product['price_currency']) ? $product['price_currency'] : '',
+                        'price_interval' => isset($product['price_interval']) ? $product['price_interval'] : '',
+                    ];
+                }
+            }
+
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log('ACF Stripe Product AJAX: Returning ' . count($items) . ' products');
+            }
+
+            wp_send_json_success(['items' => $items, 'more' => false]);
+        }
+
         public function fetch_subscriptions($search = '', $secret_key = null)
         {
             $client = $this->get_stripe_client($secret_key);
@@ -623,6 +745,174 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
             } catch (\Stripe\Exception\ApiErrorException $exception) {
                 return new WP_Error('acf_stripe_api_error', $exception->getMessage());
             }
+        }
+
+        public function fetch_products($search = '', $secret_key = null)
+        {
+            $client = $this->get_stripe_client($secret_key);
+            if (is_wp_error($client)) {
+                return $client;
+            }
+
+            try {
+                if (!empty($search)) {
+                    $query = $this->prepare_product_search_query($search);
+                    if ($query) {
+                        $result = $client->products->search([
+                            'query'  => $query,
+                            'limit'  => 20,
+                            'expand' => ['data.default_price']
+                        ]);
+
+                        return $this->convert_stripe_collection($result);
+                    }
+                }
+
+                $result = $client->products->all([
+                    'limit'  => 20,
+                    'expand' => ['data.default_price'],
+                ]);
+
+                return $this->convert_stripe_collection($result);
+            } catch (\Stripe\Exception\ApiErrorException $exception) {
+                return new WP_Error('acf_stripe_api_error', $exception->getMessage());
+            }
+        }
+
+        public function fetch_product($product_id, $secret_key = null)
+        {
+            $client = $this->get_stripe_client($secret_key);
+            if (is_wp_error($client)) {
+                return $client;
+            }
+
+            $product_id = trim($product_id);
+            if ('' === $product_id) {
+                return new WP_Error('acf_stripe_missing_product', __('Product ID is required.', 'acf-stripe-product-field'));
+            }
+
+            try {
+                $product = $client->products->retrieve($product_id, [
+                    'expand' => ['default_price'],
+                ]);
+
+                return $this->convert_stripe_object($product);
+            } catch (\Stripe\Exception\ApiErrorException $exception) {
+                return new WP_Error('acf_stripe_api_error', $exception->getMessage());
+            }
+        }
+
+        protected function prepare_product_search_query($search)
+        {
+            $term = trim($search);
+            if ('' === $term) {
+                return '';
+            }
+
+            // Clean invalid characters and limit length.
+            $term = preg_replace('/[^a-zA-Z0-9@._\-\s]/', '', $term);
+            $term = substr($term, 0, 50);
+            $term = trim($term);
+            if ('' === $term) {
+                return '';
+            }
+
+            return sprintf("name:'%1\$s*' OR description:'%1\$s*'", $term);
+        }
+
+        public function format_product_label($product)
+        {
+            $name = isset($product['name']) ? $product['name'] : '';
+            $active = isset($product['active']) ? (bool) $product['active'] : false;
+            $price = '';
+
+            $price_amount = null;
+            $price_currency = null;
+            $price_interval = null;
+
+            if (isset($product['price_amount']) && isset($product['price_currency'])) {
+                $price_amount = (float) $product['price_amount'];
+                $price_currency = $product['price_currency'];
+                $price_interval = isset($product['price_interval']) ? $product['price_interval'] : '';
+            } elseif (isset($product['default_price']) && is_array($product['default_price'])) {
+                $default_price = $product['default_price'];
+                if (isset($default_price['unit_amount'])) {
+                    $price_amount = $default_price['unit_amount'] / 100;
+                }
+                if (isset($default_price['currency'])) {
+                    $price_currency = $default_price['currency'];
+                }
+                if (isset($default_price['recurring']['interval'])) {
+                    $price_interval = $default_price['recurring']['interval'];
+                }
+            }
+
+            if (null !== $price_amount && !empty($price_currency)) {
+                $currency = strtoupper($price_currency);
+                $amount = number_format((float) $price_amount, 2);
+                $interval = $price_interval ? '/' . $price_interval : '';
+                $price = sprintf('%s%s%s', $currency, $amount, $interval);
+            }
+
+            $parts = [];
+            if ($name) {
+                $parts[] = $name;
+            }
+
+            if ($price) {
+                $parts[] = $price;
+            }
+
+            if (!$name && isset($product['id'])) {
+                $parts[] = $product['id'];
+            }
+
+            $label = implode(' – ', $parts);
+
+            if (!$active) {
+                $label .= $label ? ' ' : '';
+                $label .= __('(inactive)', 'acf-stripe-product-field');
+            }
+
+            return $label ? $label : (isset($product['id']) ? $product['id'] : __('Stripe product', 'acf-stripe-product-field'));
+        }
+
+        protected function normalize_product_for_response($product)
+        {
+            if (!is_array($product)) {
+                return [];
+            }
+
+            $price_amount = '';
+            $price_currency = '';
+            $price_interval = '';
+
+            if (isset($product['default_price']) && is_array($product['default_price'])) {
+                $default_price = $product['default_price'];
+                if (isset($default_price['unit_amount'])) {
+                    $price_amount = $default_price['unit_amount'] / 100;
+                }
+                if (isset($default_price['currency'])) {
+                    $price_currency = $default_price['currency'];
+                }
+                if (isset($default_price['recurring']['interval'])) {
+                    $price_interval = $default_price['recurring']['interval'];
+                }
+            }
+
+            $normalized = [
+                'id'             => isset($product['id']) ? $product['id'] : '',
+                'name'           => isset($product['name']) ? $product['name'] : '',
+                'description'    => isset($product['description']) ? $product['description'] : '',
+                'active'         => isset($product['active']) ? (bool) $product['active'] : false,
+                'price_amount'   => $price_amount,
+                'price_currency' => $price_currency,
+                'price_interval' => $price_interval,
+            ];
+
+            $normalized['label'] = $this->format_product_label($normalized);
+
+            return $normalized;
         }
 
         public function format_subscription_label($subscription)
