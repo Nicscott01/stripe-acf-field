@@ -11,6 +11,10 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+$acf_stripe_autoload = __DIR__ . '/vendor/autoload.php';
+if (file_exists($acf_stripe_autoload)) {
+    require_once $acf_stripe_autoload;
+}
 
 if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
     class ACF_Stripe_Customer_Field_Plugin
@@ -18,6 +22,7 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
         const OPTION_PREFIX = 'acf_stripe_';
         protected $path;
         protected $url;
+        protected $stripe_clients = [];
 
         public function __construct()
         {
@@ -204,27 +209,32 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
 
         public function fetch_customers($search = '', $secret_key = null)
         {
-            $secret_key = null === $secret_key ? $this->get_secret_key() : $secret_key;
-
-            if (empty($secret_key)) {
-                return new WP_Error('acf_stripe_missing_token', __('Stripe secret key is missing.', 'acf-stripe-customer-field'));
+            $client = $this->get_stripe_client($secret_key);
+            if (is_wp_error($client)) {
+                return $client;
             }
 
-            $endpoint = 'https://api.stripe.com/v1/customers';
-            $args = ['limit' => 20];
-
+            $search_value = '';
             if (!empty($search)) {
                 $search_value = $this->prepare_search_query($search);
-                if ($search_value) {
-                    $endpoint = 'https://api.stripe.com/v1/customers/search';
-                    $args['query'] = $search_value;
-                }
             }
 
-            $response = $this->perform_stripe_get(add_query_arg($args, $endpoint), $secret_key);
-            $body = $this->maybe_decode_stripe_response($response, __('Unable to retrieve customers from Stripe.', 'acf-stripe-customer-field'));
+            try {
+                if (!empty($search_value)) {
+                    $result = $client->customers->search([
+                        'query' => $search_value,
+                        'limit' => 20,
+                    ]);
+                } else {
+                    $result = $client->customers->all([
+                        'limit' => 20,
+                    ]);
+                }
 
-            return $body;
+                return $this->convert_stripe_collection($result);
+            } catch (\Stripe\Exception\ApiErrorException $exception) {
+                return new WP_Error('acf_stripe_api_error', $exception->getMessage());
+            }
         }
 
         /**
@@ -236,10 +246,9 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
          */
         public function fetch_customer($customer_id, $secret_key = null)
         {
-            $secret_key = null === $secret_key ? $this->get_secret_key() : $secret_key;
-
-            if (empty($secret_key)) {
-                return new WP_Error('acf_stripe_missing_token', __('Stripe secret key is missing.', 'acf-stripe-customer-field'));
+            $client = $this->get_stripe_client($secret_key);
+            if (is_wp_error($client)) {
+                return $client;
             }
 
             $customer_id = trim($customer_id);
@@ -247,14 +256,12 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
                 return new WP_Error('acf_stripe_missing_customer', __('Customer ID is required.', 'acf-stripe-customer-field'));
             }
 
-            $response = $this->perform_stripe_get(
-                'https://api.stripe.com/v1/customers/' . rawurlencode($customer_id),
-                $secret_key
-            );
-
-            $body = $this->maybe_decode_stripe_response($response, __('Unable to retrieve the customer from Stripe.', 'acf-stripe-customer-field'));
-
-            return $body;
+            try {
+                $customer = $client->customers->retrieve($customer_id, []);
+                return $this->convert_stripe_object($customer);
+            } catch (\Stripe\Exception\ApiErrorException $exception) {
+                return new WP_Error('acf_stripe_api_error', $exception->getMessage());
+            }
         }
 
         protected function prepare_search_query($search)
@@ -296,28 +303,70 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
             return isset($customer['id']) ? $customer['id'] : __('Unknown customer', 'acf-stripe-customer-field');
         }
 
-        protected function perform_stripe_get($url, $secret_key)
+        protected function get_stripe_client($secret_key = null)
         {
-            return wp_remote_get($url, [
-                'timeout' => 20,
-                'headers' => $this->get_api_request_headers($secret_key),
-            ]);
+            $secret_key = null === $secret_key ? $this->get_secret_key() : $secret_key;
+
+            if (empty($secret_key)) {
+                return new WP_Error('acf_stripe_missing_token', __('Stripe secret key is missing.', 'acf-stripe-field'));
+            }
+
+            $cache_key = md5($secret_key);
+
+            if (isset($this->stripe_clients[$cache_key])) {
+                return $this->stripe_clients[$cache_key];
+            }
+
+            $client_args = [
+                'api_key'        => $secret_key,
+                'stripe_version' => '2022-11-15',
+            ];
+
+            $client_args = apply_filters('acf_stripe_field/stripe_client_args', $client_args, $secret_key);
+
+            try {
+                $client = new \Stripe\StripeClient($client_args);
+            } catch (\Throwable $exception) {
+                return new WP_Error('acf_stripe_client_error', $exception->getMessage());
+            }
+
+            $client = apply_filters('acf_stripe_field/stripe_client', $client, $secret_key, $client_args);
+
+            $this->stripe_clients[$cache_key] = $client;
+
+            return $client;
         }
 
-        protected function maybe_decode_stripe_response($response, $fallback_message)
+        protected function convert_stripe_object($object)
         {
-            if (is_wp_error($response)) {
-                return new WP_Error('acf_stripe_request_failed', $response->get_error_message());
+            if (is_array($object)) {
+                return $object;
             }
 
-            $body = json_decode(wp_remote_retrieve_body($response), true);
-
-            if (empty($body) || isset($body['error'])) {
-                $message = isset($body['error']['message']) ? $body['error']['message'] : $fallback_message;
-                return new WP_Error('acf_stripe_invalid_response', $message);
+            if ($object instanceof \JsonSerializable) {
+                $decoded = json_decode(json_encode($object), true);
+                if (is_array($decoded)) {
+                    return $decoded;
+                }
             }
 
-            return $body;
+            return [];
+        }
+
+        protected function convert_stripe_collection($collection)
+        {
+            $items = [];
+
+            if (is_object($collection) && isset($collection->data) && is_array($collection->data)) {
+                foreach ($collection->data as $item) {
+                    $items[] = $this->convert_stripe_object($item);
+                }
+            }
+
+            return [
+                'data'     => $items,
+                'has_more' => (bool) (is_object($collection) && isset($collection->has_more) ? $collection->has_more : false),
+            ];
         }
 
         public function is_connected()
@@ -332,16 +381,6 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
                 $secret_key = (string) constant('ACF_STRIPE_CUSTOMER_SECRET_KEY');
             }
             return apply_filters('acf_stripe_customer_field/secret_key', $secret_key);
-        }
-
-        protected function get_api_request_headers($secret_key)
-        {
-            $headers = [
-                'Authorization' => 'Bearer ' . $secret_key,
-                'Stripe-Version' => '2022-11-15',
-                'User-Agent' => 'ACFStripeCustomerField/1.0; WordPress/' . get_bloginfo('version'),
-            ];
-            return apply_filters('acf_stripe_customer_field/api_request_headers', $headers, $secret_key);
         }
 
         public function get_option($key)
@@ -543,28 +582,28 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
 
         public function fetch_subscriptions($search = '', $secret_key = null)
         {
-            $secret_key = null === $secret_key ? $this->get_secret_key() : $secret_key;
-
-            if (empty($secret_key)) {
-                return new WP_Error('acf_stripe_missing_token', __('Stripe secret key is missing.', 'acf-stripe-subscription-field'));
+            $client = $this->get_stripe_client($secret_key);
+            if (is_wp_error($client)) {
+                return $client;
             }
 
-            $endpoint = 'https://api.stripe.com/v1/subscriptions';
-            $url      = add_query_arg(['limit' => 20], $endpoint);
-            $url     .= '&expand[]=data.customer&expand[]=data.items.data.plan&expand[]=data.items.data.price';
+            try {
+                $result = $client->subscriptions->all([
+                    'limit'  => 20,
+                    'expand' => ['data.customer', 'data.items.data.plan', 'data.items.data.price'],
+                ]);
 
-            // Note: Stripe's subscriptions API does not support search queries.
-            $response = $this->perform_stripe_get($url, $secret_key);
-
-            return $this->maybe_decode_stripe_response($response, __('Unable to retrieve subscriptions from Stripe.', 'acf-stripe-subscription-field'));
+                return $this->convert_stripe_collection($result);
+            } catch (\Stripe\Exception\ApiErrorException $exception) {
+                return new WP_Error('acf_stripe_api_error', $exception->getMessage());
+            }
         }
 
         public function fetch_subscription($subscription_id, $secret_key = null)
         {
-            $secret_key = null === $secret_key ? $this->get_secret_key() : $secret_key;
-
-            if (empty($secret_key)) {
-                return new WP_Error('acf_stripe_missing_token', __('Stripe secret key is missing.', 'acf-stripe-subscription-field'));
+            $client = $this->get_stripe_client($secret_key);
+            if (is_wp_error($client)) {
+                return $client;
             }
 
             $subscription_id = trim($subscription_id);
@@ -572,15 +611,15 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
                 return new WP_Error('acf_stripe_missing_subscription', __('Subscription ID is required.', 'acf-stripe-subscription-field'));
             }
 
-            $url = 'https://api.stripe.com/v1/subscriptions/' . rawurlencode($subscription_id);
-            $url .= '?expand[]=customer&expand[]=items.data.plan&expand[]=items.data.price';
+            try {
+                $subscription = $client->subscriptions->retrieve($subscription_id, [
+                    'expand' => ['customer', 'items.data.plan', 'items.data.price'],
+                ]);
 
-            $response = $this->perform_stripe_get(
-                $url,
-                $secret_key
-            );
-
-            return $this->maybe_decode_stripe_response($response, __('Unable to retrieve the subscription from Stripe.', 'acf-stripe-subscription-field'));
+                return $this->convert_stripe_object($subscription);
+            } catch (\Stripe\Exception\ApiErrorException $exception) {
+                return new WP_Error('acf_stripe_api_error', $exception->getMessage());
+            }
         }
 
         public function format_subscription_label($subscription)
@@ -693,57 +732,47 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
         }
 
 
-
         public function build_plan_label($plan_id)
         {
             $secret_key = $this->get_secret_key();
             if (empty($secret_key)) {
-                return new WP_Error('missing_secret_key', __('Stripe secret key is missing.', 'acf-stripe-subscription-field'));
+            return new WP_Error('missing_secret_key', __('Stripe secret key is missing.', 'acf-stripe-subscription-field'));
             }
 
-            // Retrieve the plan object.
-            $plan_response = wp_remote_get("https://api.stripe.com/v1/plans/" . rawurlencode($plan_id), [
-                'timeout' => 20,
-                'headers' => $this->get_api_request_headers($secret_key),
-            ]);
-            if (is_wp_error($plan_response)) {
-                return new WP_Error('plan_request_failed', $plan_response->get_error_message());
-            }
-            $plan_body = json_decode(wp_remote_retrieve_body($plan_response), true);
-            if (empty($plan_body) || isset($plan_body['error'])) {
-                $message = isset($plan_body['error']['message']) ? $plan_body['error']['message'] : __('Unable to retrieve the plan from Stripe.', 'acf-stripe-subscription-field');
-                return new WP_Error('invalid_plan_response', $message);
+            $client = $this->get_stripe_client($secret_key);
+            if (is_wp_error($client)) {
+            return $client;
             }
 
-            // Retrieve the product object using the product id from the plan.
-            if (empty($plan_body['product'])) {
-                return new WP_Error('missing_product_id', __('Product id is missing from the plan object.', 'acf-stripe-subscription-field'));
-            }
-            $product_id = $plan_body['product'];
-            $product_response = wp_remote_get("https://api.stripe.com/v1/products/" . rawurlencode($product_id), [
-                'timeout' => 20,
-                'headers' => $this->get_api_request_headers($secret_key),
-            ]);
-            if (is_wp_error($product_response)) {
-                return new WP_Error('product_request_failed', $product_response->get_error_message());
-            }
-            $product_body = json_decode(wp_remote_retrieve_body($product_response), true);
-            if (empty($product_body) || isset($product_body['error'])) {
-                $message = isset($product_body['error']['message']) ? $product_body['error']['message'] : __('Unable to retrieve the product from Stripe.', 'acf-stripe-subscription-field');
-                return new WP_Error('invalid_product_response', $message);
+            try {
+            $plan = $client->plans->retrieve($plan_id, []);
+            } catch (\Stripe\Exception\ApiErrorException $exception) {
+            return new WP_Error('invalid_plan_response', $exception->getMessage());
             }
 
-            $product_name = !empty($product_body['name']) ? $product_body['name'] : __('Unknown product', 'acf-stripe-subscription-field');
-            $amount       = isset($plan_body['amount']) ? $plan_body['amount'] : 0;
-            $currency     = isset($plan_body['currency']) ? strtoupper($plan_body['currency']) : '';
-            $interval     = isset($plan_body['interval']) ? $plan_body['interval'] : '';
+            if (empty($plan->product)) {
+            return new WP_Error('missing_product_id', __('Product id is missing from the plan object.', 'acf-stripe-subscription-field'));
+            }
+
+            try {
+            $product = $client->products->retrieve($plan->product, []);
+            } catch (\Stripe\Exception\ApiErrorException $exception) {
+            return new WP_Error('invalid_product_response', $exception->getMessage());
+            }
+
+            $product_name = !empty($product->name) ? $product->name : __('Unknown product', 'acf-stripe-subscription-field');
+            $amount       = isset($plan->amount) ? $plan->amount : 0;
+            $currency     = isset($plan->currency) ? strtoupper($plan->currency) : '';
+            $interval     = isset($plan->interval) ? $plan->interval : '';
 
             // Format the amount (Stripe amounts are in cents).
             $price = number_format($amount / 100, 2);
 
-            // Build and return the label: {product_name} {price_amount}/{price_interval}
+            // Build and return the label: {product_name} {currency}{price}/{interval}
             return sprintf('%s %s%s/%s', $product_name, $currency, $price, $interval);
         }
+
+
 
 
 
@@ -759,7 +788,7 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
             if ($plan && $customer_display) {
                 $label = sprintf('%1$s – %2$s', $this->build_plan_label($plan), $customer_display);
             } elseif ($plan) {
-                $label = $plan;
+                $label = $this->build_plan_label($plan);
             } elseif ($customer_display) {
                 $label = $customer_display;
             }
@@ -767,7 +796,7 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
             if ('' === $label) {
                 $label = __('Stripe subscription', 'acf-stripe-subscription-field');
             }
-/*
+            /*
             $meta_parts = [];
             if ($id) {
                 $meta_parts[] = $id;
@@ -778,8 +807,7 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
 
             if (!empty($meta_parts)) {
                 $label .= ' [' . implode(' | ', $meta_parts) . ']';
-            }
-*/
+            }*/
             return $label;
         }
     }
