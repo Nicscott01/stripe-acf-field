@@ -61,7 +61,7 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
             if (defined('WP_DEBUG') && WP_DEBUG) {
                 error_log('ACF Stripe Customer Field: Registering field type');
             }
-            
+            require_once $this->path . 'includes/class-acf-field-stripe-base.php';
             require_once $this->path . 'includes/class-acf-field-stripe-customer.php';
             require_once $this->path . 'includes/class-acf-field-stripe-subscription.php';
             new ACF_Field_Stripe_Customer($this);
