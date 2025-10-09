@@ -21,15 +21,41 @@
                 ajaxAction: `acf_stripe_search_${objectType}s`,
                 fieldSelector: `.acf-stripe-${objectType.replace('_', '-')}-select`,
                 fieldTypeSelector: `[data-type="stripe_${objectType}"]`,
-                loadingText: 'Loading...',
+                noticeSelector: '.acf-stripe-notice',
+                loadingText: 'Loading…',
                 errorText: 'Failed to load items',
-                noResultsText: 'No items found'
+                noResultsText: 'No items found',
+                optionDataKey: `${objectType}-data`,
+                loadedDataFlag: `${objectType}s-loaded`,
+                hiddenFieldSuffix: '_data',
+                globalConfigGetter: () => ({}),
+                ajaxDataBuilder: (search, instance) => ({
+                    action: instance.config.ajaxAction,
+                    nonce: instance.getNonce(),
+                    search: search || '',
+                    page: 1
+                }),
+                extractItemsFromResponse: (response) => {
+                    if (response && response.success && response.data) {
+                        if (Array.isArray(response.data.items)) {
+                            return response.data.items;
+                        }
+                        if (Array.isArray(response.data.data)) {
+                            return response.data.data;
+                        }
+                        if (Array.isArray(response.data)) {
+                            return response.data;
+                        }
+                    }
+                    return [];
+                },
+                extractItemData: (item) => ({ id: item.id || '', label: item.text || item.id || '' }),
+                formatResult: null,
+                formatSelection: null,
+                handleInitialValue: null,
+                handleSelectionChange: null
             }, config);
-            
-            console.log(`Creating ACF Stripe ${objectType} field handler`);
-            console.log(`Field selector: ${this.config.fieldSelector}`);
-            console.log(`AJAX action: ${this.config.ajaxAction}`);
-            
+
             this.init();
         }
 
@@ -132,12 +158,12 @@
             // Check if Stripe is connected
             if (!this.isConnected()) {
                 $select.prop('disabled', true);
-                $field.find('.acf-stripe-notice').show();
+                $field.find(this.config.noticeSelector).show();
                 return;
             }
 
             $select.prop('disabled', false);
-            $field.find('.acf-stripe-notice').hide();
+            $field.find(this.config.noticeSelector).hide();
 
             // Initialize Select2
             this.initializeSelect2($field, $select);
@@ -156,7 +182,7 @@
             }
 
             const allowClear = $select.data('allow-clear') === 1 || $select.data('allow-clear') === '1';
-            const placeholder = $select.data('placeholder') || this.getDefaultPlaceholder();
+            const placeholder = $select.data('placeholder') || this.getPlaceholder();
 
             console.log(`Initializing Select2 for ${this.objectType} with manual loading`);
             
@@ -164,8 +190,8 @@
                 width: '100%',
                 allowClear: allowClear,
                 placeholder: placeholder,
-                templateResult: (item) => this.formatResult(item),
-                templateSelection: (item) => this.formatSelection(item),
+                templateResult: (item) => this.getFormatResult()(item),
+                templateSelection: (item) => this.getFormatSelection()(item),
                 escapeMarkup: function(markup) {
                     return markup;
                 }
@@ -184,6 +210,11 @@
                 this.handleSelectionChange($field, $select);
             });
 
+            // Ensure the clear control resets the field state.
+            $select.on('select2:clear', () => {
+                $select.val('').trigger('change');
+            });
+
             // Handle initial value if present
             this.handleInitialValue($select);
         }
@@ -194,7 +225,7 @@
          * @param {jQuery} $select - Select element
          */
         loadItemsOnOpen($select) {
-            const dataKey = `${this.objectType}s-loaded`;
+            const dataKey = this.config.loadedDataFlag;
             
             if ($select.data(dataKey)) {
                 return; // Already loaded
@@ -207,12 +238,7 @@
             $.ajax({
                 url: this.getAjaxUrl(),
                 type: 'POST',
-                data: {
-                    action: this.config.ajaxAction,
-                    nonce: this.getNonce(),
-                    search: '',
-                    page: 1
-                },
+                data: this.buildAjaxData('', $select),
                 success: (response) => {
                     console.log(`${this.objectType}s loaded successfully:`, response);
                     
@@ -249,15 +275,20 @@
             }
             
             // Get items from response
-            const items = this.extractItemsFromResponse(response);
+            const items = this.getItemsFromResponse(response);
             
             // Add options
             items.forEach((item) => {
-                const selected = item.id === selectedValue ? ' selected' : '';
-                const $option = $(`<option value="${item.id}"${selected}>${item.text}</option>`);
+                const data = this.getOptionData(item);
+                if (!data || !data.id) {
+                    return;
+                }
+                const selected = data.id === selectedValue ? ' selected' : '';
+                const label = data.label || data.text || data.id;
+                const $option = $(`<option value="${data.id}"${selected}>${label}</option>`);
                 
                 // Store item data in the option for later use
-                $option.data(`${this.objectType}-data`, this.extractItemData(item));
+                $option.data(this.config.optionDataKey, data);
                 
                 $select.append($option);
             });
@@ -272,31 +303,33 @@
          * @param {jQuery} $select - Select element
          */
         handleSelectionChange($field, $select) {
+            if (typeof this.config.handleSelectionChange === 'function') {
+                this.config.handleSelectionChange($field, $select, this);
+                return;
+            }
+
             const selectedValue = $select.val();
-            const hiddenDataField = $field.find(`input[name="${$select.attr('name')}_data"]`);
+            let hiddenDataField = $field.find(`input[name="${$select.attr('name')}${this.config.hiddenFieldSuffix}"]`);
             
             if (selectedValue && selectedValue !== '') {
                 const selectedOption = $select.find('option:selected');
-                const itemData = selectedOption.data(`${this.objectType}-data`);
+                const itemData = selectedOption.data(this.config.optionDataKey);
                 
                 if (itemData) {
                     // Create or update hidden field with item data
                     if (hiddenDataField.length === 0) {
-                        const $hiddenField = $(`<input type="hidden" name="${$select.attr('name')}_data" />`);
-                        $field.append($hiddenField);
-                        hiddenDataField = $hiddenField;
+                        hiddenDataField = $(`<input type="hidden" name="${$select.attr('name')}${this.config.hiddenFieldSuffix}" />`);
+                        $field.append(hiddenDataField);
                     }
                     
                     hiddenDataField.val(JSON.stringify(itemData));
-                    console.log(`Updated hidden field with ${this.objectType} data:`, itemData);
                 } else {
-                    console.warn(`No ${this.objectType} data available for selected option`);
+                    if (hiddenDataField.length > 0) {
+                        hiddenDataField.remove();
+                    }
                 }
-            } else {
-                // Clear hidden field if no selection
-                if (hiddenDataField.length > 0) {
-                    hiddenDataField.remove();
-                }
+            } else if (hiddenDataField.length > 0) {
+                hiddenDataField.remove();
             }
         }
 
@@ -306,34 +339,24 @@
          * @param {jQuery} $select - Select element
          */
         handleInitialValue($select) {
+            if (typeof this.config.handleInitialValue === 'function') {
+                this.config.handleInitialValue($select, this);
+                return;
+            }
+
             const initialValue = $select.val();
-            
             if (!initialValue || initialValue === '') {
                 return;
             }
 
-            // Handle case where initialValue might be JSON object instead of ID
-            let actualValue = initialValue;
-            if (typeof initialValue === 'object') {
-                console.warn(`Initial value is an object, extracting ${this.objectType} ID:`, initialValue);
-                if (initialValue.id) {
-                    actualValue = initialValue.id;
-                    $select.val(actualValue);
-                }
-            }
-            
             const displayText = $select.data('selected-text');
-            console.log(`Field has initial value:`, actualValue, 'with text:', displayText);
-            
-            if (displayText && displayText !== actualValue) {
-                // Update option with display text
-                const $option = $select.find(`option[value="${actualValue}"]`);
+            if (displayText && displayText !== initialValue) {
+                const $option = $select.find(`option[value="${initialValue}"]`);
                 if ($option.length) {
                     $option.text(displayText);
                 } else {
-                    $select.append(`<option value="${actualValue}" selected="selected">${displayText}</option>`);
+                    $select.append(`<option value="${initialValue}" selected="selected">${displayText}</option>`);
                 }
-                console.log('Used server-provided display text, no API call needed');
             }
         }
 
@@ -373,28 +396,12 @@
          * @param {Object} response - AJAX response
          * @return {Array} Items array
          */
-        extractItemsFromResponse(response) {
-            // Default expects response.data.items (customer format)
-            // Override in subclasses if different format is used
-            if (response.success && response.data) {
-                return response.data.items || response.data || [];
-            }
-            return [];
+        getItemsFromResponse(response) {
+            return this.config.extractItemsFromResponse(response, this);
         }
 
-        /**
-         * Extract item data for storage in option
-         * 
-         * @param {Object} item - Item from response
-         * @return {Object} Data to store
-         */
-        extractItemData(item) {
-            // Default extracts id, name, email - override in subclasses
-            return {
-                id: item.id,
-                name: item.name || '',
-                email: item.email || ''
-            };
+        getOptionData(item) {
+            return this.config.extractItemData(item, this);
         }
 
         /**
@@ -433,7 +440,17 @@
          * @return {boolean} True if connected
          */
         isConnected() {
-            return window.acfStripeField && window.acfStripeField.is_connected;
+            const cfg = this.getGlobalConfig();
+            if (!cfg) {
+                return false;
+            }
+            if (typeof cfg.isConnected !== 'undefined') {
+                return !!cfg.isConnected;
+            }
+            if (typeof cfg.is_connected !== 'undefined') {
+                return !!cfg.is_connected;
+            }
+            return false;
         }
 
         /**
@@ -442,7 +459,14 @@
          * @return {string} AJAX URL
          */
         getAjaxUrl() {
-            return (window.acfStripeField && window.acfStripeField.ajax_url) || window.ajaxurl;
+            const cfg = this.getGlobalConfig();
+            if (cfg && cfg.ajaxUrl) {
+                return cfg.ajaxUrl;
+            }
+            if (cfg && cfg.ajax_url) {
+                return cfg.ajax_url;
+            }
+            return window.ajaxurl;
         }
 
         /**
@@ -451,7 +475,50 @@
          * @return {string} Nonce
          */
         getNonce() {
-            return (window.acfStripeField && window.acfStripeField.nonce) || '';
+            const cfg = this.getGlobalConfig();
+            if (cfg && cfg.nonce) {
+                return cfg.nonce;
+            }
+            return '';
+        }
+
+        getPlaceholder() {
+            const strings = this.getStrings();
+            if (strings && strings.placeholder) {
+                return strings.placeholder;
+            }
+            return this.getDefaultPlaceholder();
+        }
+
+        getStrings() {
+            const cfg = this.getGlobalConfig();
+            return (cfg && cfg.strings) || {};
+        }
+
+        getFormatResult() {
+            if (typeof this.config.formatResult === 'function') {
+                return this.config.formatResult;
+            }
+            return (item) => this.formatResult(item);
+        }
+
+        getFormatSelection() {
+            if (typeof this.config.formatSelection === 'function') {
+                return this.config.formatSelection;
+            }
+            return (item) => this.formatSelection(item);
+        }
+
+        getGlobalConfig() {
+            try {
+                return this.config.globalConfigGetter(this) || {};
+            } catch (e) {
+                return {};
+            }
+        }
+
+        buildAjaxData(search, $select) {
+            return this.config.ajaxDataBuilder(search, this, $select) || {};
         }
     }
 

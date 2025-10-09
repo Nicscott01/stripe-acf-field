@@ -1,375 +1,259 @@
 (function($) {
     'use strict';
 
-    var config = typeof acfStripeSubscriptionField !== 'undefined' ? acfStripeSubscriptionField : null;
-
-    function debugLog() {
-        if (config && config.debug && window.console && console.log) {
-            console.log.apply(console, arguments);
-        }
+    if (typeof ACFStripeFieldBase === 'undefined') {
+        console.error('ACFStripeFieldBase is required but not available.');
+        return;
     }
 
-    function resolveField(field) {
-        if (!field) {
-            return null;
-        }
+    const OPTION_DATA_KEY = 'subscription-data';
 
-        if (field.$el && field.$el.length) {
-            return field.$el;
+    function resolveCustomerDisplay(data) {
+        if (data.customer_name && data.customer_email) {
+            return `${data.customer_name} (${data.customer_email})`;
         }
-
-        if (field.jquery) {
-            return field;
+        if (data.customer_name) {
+            return data.customer_name;
         }
-
-        if (field.field && field.field.jquery) {
-            return field.field;
+        if (data.customer_email) {
+            return data.customer_email;
         }
-
-        return $('.acf-field[data-type="stripe_subscription"]');
+        if (data.customer_id) {
+            return data.customer_id;
+        }
+        return '';
     }
 
-    function findSelect($field) {
-        if (!$field) {
-            return null;
+    function buildSubscriptionLabel(data) {
+        if (data.label) {
+            return data.label;
         }
-        var $select = $field.find('select.acf-stripe-subscription-select');
-        return $select.length ? $select : null;
+
+        const customerDisplay = resolveCustomerDisplay(data);
+        let label = '';
+
+        if (data.plan && customerDisplay) {
+            label = `${data.plan} – ${customerDisplay}`;
+        } else if (data.plan) {
+            label = data.plan;
+        } else if (customerDisplay) {
+            label = customerDisplay;
+        }
+
+        const metaParts = [];
+        if (data.id) {
+            metaParts.push(data.id);
+        }
+        if (data.status) {
+            metaParts.push(data.status);
+        }
+
+        if (!label) {
+            label = data.id || 'Stripe subscription';
+        }
+
+        if (metaParts.length) {
+            label += ` [${metaParts.join(' | ')}]`;
+        }
+
+        return label;
     }
 
-    function normalizeData(raw) {
-        var data = raw || {};
-        var normalized = {
-            id: data.id || '',
-            label: data.label || data.text || data.plan || data.name || data.email || '',
-            plan: data.plan || '',
-            status: data.status || '',
-            customer_id: data.customer_id || data.customer || '',
-            customer_name: data.customer_name || data.name || '',
-            customer_email: data.customer_email || data.email || ''
+    function resolveSubscriptionData(item) {
+        if (!item) {
+            return {};
+        }
+
+        if (item[OPTION_DATA_KEY]) {
+            return item[OPTION_DATA_KEY];
+        }
+
+        if (item.subscriptionData) {
+            return item.subscriptionData;
+        }
+
+        if (item.element) {
+            const data = $(item.element).data(OPTION_DATA_KEY);
+            if (data) {
+                return data;
+            }
+        }
+
+        const plan = item.plan || (item.items && item.items[0] && item.items[0].plan) || '';
+        const status = item.status || '';
+        const customer_name = item.customer_name || item.name || '';
+        const customer_email = item.customer_email || item.email || '';
+        const customer_id = item.customer_id || item.customer || '';
+
+        return {
+            id: item.id || '',
+            label: item.text || '',
+            text: item.text || '',
+            plan: plan,
+            status: status,
+            customer_id: customer_id,
+            customer_name: customer_name,
+            customer_email: customer_email,
+            name: customer_name,
+            email: customer_email
         };
-
-        normalized.name = normalized.customer_name;
-        normalized.email = normalized.customer_email;
-
-        if (!normalized.label && normalized.id) {
-            normalized.label = normalized.id;
-        }
-
-        return normalized;
     }
 
-    function ensureHiddenInput($field, $select, data) {
-        if (!$field || !$select) {
-            return;
-        }
-
-        var hiddenName = $select.attr('name') + '_data';
-        var $hidden = $field.find('input[name="' + hiddenName + '"]');
-
-        if (!data || !data.id) {
-            if ($hidden.length) {
-                $hidden.remove();
-            }
-            return;
-        }
-
-        if (!$hidden.length) {
-            $hidden = $('<input type="hidden" />').attr('name', hiddenName).appendTo($field);
-        }
-
-        $hidden.val(JSON.stringify(data));
-    }
-
-    function formatResult(subscription) {
-        if (!subscription || subscription.loading) {
-            return subscription && subscription.text ? subscription.text : '';
-        }
-
-        var normalized = normalizeData(subscription);
-        var labelText = normalized.label || subscription.text || subscription.id || '';
-        var $container = $('<div class="acf-stripe-subscription-option"></div>');
-
-        if (labelText) {
-            $('<div class="subscription-label"></div>').text(labelText).appendTo($container);
-        }
-
-        if (normalized.plan && labelText.indexOf(normalized.plan) === -1) {
-            $('<div class="subscription-plan"></div>').text(normalized.plan).appendTo($container);
-        }
-
-        if (normalized.status && labelText.indexOf(normalized.status) === -1) {
-            $('<div class="subscription-status"></div>').text(normalized.status).appendTo($container);
-        }
-
-        if (normalized.customer_name || normalized.customer_email) {
-            var customerLine = normalized.customer_name;
-            if (normalized.customer_email) {
-                customerLine = customerLine ? customerLine + ' (' + normalized.customer_email + ')' : normalized.customer_email;
-            }
-            $('<div class="subscription-customer"></div>').text(customerLine).appendTo($container);
-        } else if (normalized.customer_id) {
-            $('<div class="subscription-customer"></div>').text(normalized.customer_id).appendTo($container);
-        }
-
-        if (normalized.id && labelText.indexOf(normalized.id) === -1) {
-            $('<div class="subscription-id"></div>').text(normalized.id).appendTo($container);
-        }
-
-        return $container;
-    }
-
-    function formatSelection(subscription) {
-        if (!subscription) {
-            return '';
-        }
-
-        var normalized = normalizeData(subscription);
-        return normalized.label || normalized.id || '';
-    }
-
-    function hydrateInitialOption($field, $select) {
-        var initialValue = $select.val();
-        if (!initialValue) {
-            ensureHiddenInput($field, $select, null);
-            return;
-        }
-
-        var $option = $select.find('option[value="' + initialValue + '"]');
-        var hiddenName = $select.attr('name') + '_data';
-        var $hidden = $field.find('input[name="' + hiddenName + '"]');
-        var cachedData = null;
-
-        if ($hidden.length) {
-            try {
-                cachedData = JSON.parse($hidden.val());
-            } catch (e) {
-                cachedData = null;
-            }
-        }
-
-        if (cachedData && cachedData.id === initialValue) {
-            var normalized = normalizeData(cachedData);
-            if (!$option.length) {
-                $option = $('<option value="' + normalized.id + '" selected="selected">' + normalized.label + '</option>');
-                $select.append($option);
-            } else {
-                $option.text(normalized.label).attr('selected', 'selected');
-            }
-            $option.data('subscription-data', normalized);
-            ensureHiddenInput($field, $select, normalized);
-            return;
-        }
-
-        var serverText = $select.data('selected-text');
-        if (!$option.length && serverText && serverText !== initialValue) {
-            $option = $('<option value="' + initialValue + '" selected="selected">' + serverText + '</option>');
-            $select.append($option);
-        } else if ($option.length && serverText) {
-            $option.text(serverText).attr('selected', 'selected');
-        }
-
-        if ($option.length) {
-            var fallbackData = normalizeData({
-                id: initialValue,
-                label: serverText || $option.text() || initialValue
-            });
-            $option.data('subscription-data', fallbackData);
-            ensureHiddenInput($field, $select, fallbackData);
-        } else {
-            ensureHiddenInput($field, $select, null);
-        }
-    }
-
-    function populateSelect($field, $select, items) {
-        var allowClear = $select.data('allow-clear') === 1 || $select.data('allow-clear') === '1';
-        var selectedValue = $select.val();
-        var $existingSelected = $select.find('option:selected');
-        var existingData = null;
-
-        if ($existingSelected.length) {
-            existingData = $existingSelected.data('subscription-data') || normalizeData({
-                id: $existingSelected.val(),
-                label: $existingSelected.text()
-            });
-        } else if (selectedValue) {
-            existingData = normalizeData({ id: selectedValue, label: selectedValue });
-        }
-
-        $select.empty();
-
-        if (allowClear) {
-            $select.append('<option value=""></option>');
-        }
-
-        if (Array.isArray(items)) {
-            items.forEach(function(item) {
-                if (!item || !item.id) {
-                    return;
-                }
-                var normalized = normalizeData(item);
-                var isSelected = normalized.id === selectedValue;
-                var $option = $('<option value="' + normalized.id + '"' + (isSelected ? ' selected="selected"' : '') + '>' + normalized.label + '</option>');
-                $option.data('subscription-data', normalized);
-                $select.append($option);
+    class ACFStripeSubscriptionField extends ACFStripeFieldBase {
+        constructor() {
+            super('subscription', {
+                noticeSelector: '.acf-stripe-subscription-notice',
+                optionDataKey: OPTION_DATA_KEY,
+                loadedDataFlag: 'subscriptions-loaded'
             });
         }
 
-        if (selectedValue && !$select.find('option[value="' + selectedValue + '"]').length && existingData && existingData.id) {
-            var $fallbackOption = $('<option value="' + existingData.id + '" selected="selected">' + existingData.label + '</option>');
-            $fallbackOption.data('subscription-data', existingData);
-            $select.append($fallbackOption);
+        getGlobalConfig() {
+            return window.acfStripeSubscriptionField || {};
         }
 
-        if (selectedValue) {
-            $select.val(selectedValue);
-        }
-
-        var $selectedOption = $select.find('option:selected');
-        if ($selectedOption.length) {
-            ensureHiddenInput($field, $select, $selectedOption.data('subscription-data'));
-        }
-    }
-
-    function showDropdownMessage($dropdown, message) {
-        if (!$dropdown) {
-            return;
-        }
-        $dropdown.find('.select2-results__options').html('<li class="select2-results__option" role="option">' + message + '</li>');
-    }
-
-    function loadSubscriptions($field, $select) {
-        if (!$select || !config || !config.ajaxUrl || $select.data('subscriptions-loading') || $select.data('subscriptions-loaded')) {
-            return;
-        }
-
-        var select2Instance = $select.data('select2');
-        var $dropdown = select2Instance ? select2Instance.$dropdown : null;
-        var loadingMessage = config.strings ? config.strings.loading || 'Loading subscriptions...' : 'Loading subscriptions...';
-
-        $select.data('subscriptions-loading', true);
-        showDropdownMessage($dropdown, loadingMessage);
-
-        $.ajax({
-            url: config.ajaxUrl,
-            type: 'POST',
-            dataType: 'json',
-            data: {
+        buildAjaxData(search) {
+            const cfg = this.getGlobalConfig();
+            return {
                 action: 'acf_stripe_search_subscriptions',
-                nonce: config.nonce,
-                search: '',
+                nonce: cfg.nonce || '',
+                search: search || '',
                 page: 1
-            }
-        }).done(function(response) {
+            };
+        }
+
+        getItemsFromResponse(response) {
             if (response && response.success && response.data && Array.isArray(response.data.items)) {
-                populateSelect($field, $select, response.data.items);
-                $select.data('subscriptions-loaded', true);
-                debugLog('ACF Stripe Subscription: loaded', response.data.items);
+                return response.data.items;
+            }
+            return [];
+        }
+
+        getOptionData(item) {
+            const raw = resolveSubscriptionData(item);
+            const data = {
+                id: raw.id || '',
+                plan: raw.plan || '',
+                status: raw.status || '',
+                customer_id: raw.customer_id || '',
+                customer_name: raw.customer_name || raw.name || '',
+                customer_email: raw.customer_email || raw.email || ''
+            };
+
+            data.label = buildSubscriptionLabel(Object.assign({}, raw, data));
+            data.text = raw.text || data.label;
+            data.name = data.customer_name;
+            data.email = data.customer_email;
+
+            return data;
+        }
+
+        formatResult(item) {
+            if (!item || item.loading) {
+                return item && item.text ? item.text : '';
+            }
+
+            const data = resolveSubscriptionData(item);
+            const label = buildSubscriptionLabel(data);
+            const $container = $('<div class="acf-stripe-subscription-option"></div>');
+
+            if (label) {
+                $('<div class="subscription-label"></div>').text(label).appendTo($container);
+            }
+
+            if (data.plan && label.indexOf(data.plan) === -1) {
+                $('<div class="subscription-plan"></div>').text(data.plan).appendTo($container);
+            }
+
+            if (data.status && label.indexOf(data.status) === -1) {
+                $('<div class="subscription-status"></div>').text(data.status).appendTo($container);
+            }
+
+            const customerDisplay = resolveCustomerDisplay(data);
+            if (customerDisplay) {
+                $('<div class="subscription-customer"></div>').text(customerDisplay).appendTo($container);
+            }
+
+            if (data.id && label.indexOf(data.id) === -1) {
+                $('<div class="subscription-id"></div>').text(data.id).appendTo($container);
+            }
+
+            return $container;
+        }
+
+        formatSelection(item) {
+            if (!item) {
+                return '';
+            }
+
+            const data = resolveSubscriptionData(item);
+            return buildSubscriptionLabel(data);
+        }
+
+        handleInitialValue($select) {
+            let initialValue = $select.val();
+            const $field = $select.closest(this.config.fieldTypeSelector);
+
+            if (!initialValue) {
+                this.handleSelectionChange($field, $select);
+                return;
+            }
+
+            if (typeof initialValue === 'object' && initialValue.id) {
+                initialValue = initialValue.id;
+                $select.val(initialValue);
+            }
+
+            const hiddenFieldName = `${$select.attr('name')}${this.config.hiddenFieldSuffix}`;
+            const $hiddenField = $field.find(`input[name="${hiddenFieldName}"]`);
+            const displayText = $select.data('selected-text');
+
+            let cachedData = null;
+            if ($hiddenField.length) {
+                try {
+                    cachedData = JSON.parse($hiddenField.val());
+                } catch (error) {
+                    cachedData = null;
+                }
+            }
+
+            let optionData;
+            if (cachedData && cachedData.id === initialValue) {
+                optionData = this.getOptionData(cachedData);
             } else {
-                var invalidMessage = config && config.strings ? config.strings.error : 'Unable to load subscriptions.';
-                showDropdownMessage($dropdown, invalidMessage);
-                debugLog('ACF Stripe Subscription: invalid response', response);
-            }
-        }).fail(function(jqXHR, textStatus, errorThrown) {
-            var errorMessage = config && config.strings ? config.strings.error : 'Unable to load subscriptions.';
-            showDropdownMessage($dropdown, errorMessage);
-            debugLog('ACF Stripe Subscription: request failed', textStatus, errorThrown);
-        }).always(function() {
-            $select.removeData('subscriptions-loading');
-        });
-    }
-
-    function initField(field) {
-        var $field = resolveField(field);
-        if (!$field || !$field.length) {
-            return;
-        }
-
-        var $select = findSelect($field);
-        if (!$select || !$select.length) {
-            return;
-        }
-
-        if ($select.data('stripe-subscription-initialized')) {
-            return;
-        }
-
-        $select.data('stripe-subscription-initialized', true);
-
-        if (!config || !config.isConnected) {
-            $select.prop('disabled', true);
-            $field.find('.acf-stripe-subscription-notice').show();
-            hydrateInitialOption($field, $select);
-            return;
-        }
-
-        $select.prop('disabled', false);
-        $field.find('.acf-stripe-subscription-notice').hide();
-
-        if ($select.hasClass('select2-hidden-accessible')) {
-            $select.select2('destroy');
-        }
-
-        hydrateInitialOption($field, $select);
-
-        var allowClear = $select.data('allow-clear') === 1 || $select.data('allow-clear') === '1';
-        var placeholder = $select.data('placeholder') || (config.strings ? config.strings.placeholder : 'Select a Stripe subscription');
-
-        $select.select2({
-            width: '100%',
-            allowClear: allowClear,
-            placeholder: placeholder,
-            templateResult: formatResult,
-            templateSelection: formatSelection,
-            escapeMarkup: function(markup) {
-                return markup;
-            }
-        });
-
-        $select.on('select2:open', function() {
-            loadSubscriptions($field, $select);
-        });
-
-        $select.on('change', function() {
-            var $selectedOption = $select.find('option:selected');
-            var data = $selectedOption.length ? $selectedOption.data('subscription-data') : null;
-            ensureHiddenInput($field, $select, data ? normalizeData(data) : null);
-        });
-
-        $select.on('select2:clear', function() {
-            $select.val('').trigger('change');
-        });
-
-        debugLog('ACF Stripe Subscription: initialized field', $field);
-    }
-
-    function registerHandlers() {
-        if (typeof acf !== 'undefined') {
-            if (acf.addAction) {
-                acf.addAction('ready_field/type=stripe_subscription', initField);
-                acf.addAction('append_field/type=stripe_subscription', initField);
-            }
-
-            if (acf.add_action) {
-                acf.add_action('ready_field/type=stripe_subscription', initField);
-                acf.add_action('append_field/type=stripe_subscription', initField);
-            }
-
-            $(document).on('acf/setup_fields', function(event, context) {
-                $(context).find('.acf-field[data-type="stripe_subscription"]').each(function() {
-                    initField({ $el: $(this) });
+                optionData = this.getOptionData({
+                    id: initialValue,
+                    text: displayText && displayText !== initialValue ? displayText : initialValue,
+                    plan: cachedData && cachedData.plan ? cachedData.plan : '',
+                    status: cachedData && cachedData.status ? cachedData.status : '',
+                    customer_id: cachedData && cachedData.customer_id ? cachedData.customer_id : '',
+                    customer_name: cachedData && cachedData.customer_name ? cachedData.customer_name : '',
+                    customer_email: cachedData && cachedData.customer_email ? cachedData.customer_email : ''
                 });
-            });
+            }
+
+            const $option = this.ensureOption($select, optionData);
+            $option.data(this.config.optionDataKey, optionData);
+            this.handleSelectionChange($field, $select);
         }
 
-        $(document).ready(function() {
-            $('.acf-field[data-type="stripe_subscription"]').each(function() {
-                initField({ $el: $(this) });
-            });
-        });
+        ensureOption($select, data) {
+            let $option = $select.find(`option[value="${data.id}"]`);
+            if (!$option.length) {
+                $option = $(`<option value="${data.id}" selected="selected"></option>`);
+                $select.append($option);
+            }
+
+            $option.text(buildSubscriptionLabel(data));
+            $option.data(this.config.optionDataKey, data);
+            $select.val(data.id);
+            return $option;
+        }
     }
 
-    registerHandlers();
+    new ACFStripeSubscriptionField();
 
-    debugLog('ACF Stripe Subscription Field JavaScript loaded', config);
+    if (window.console && console.log) {
+        console.log('ACF Stripe Subscription Field JavaScript loaded');
+    }
 })(jQuery);

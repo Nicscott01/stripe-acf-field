@@ -75,8 +75,11 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
             
             wp_register_style('acf-stripe-customer-field', $this->url . 'assets/css/stripe-customer-field.css', [], '1.0.0');
             wp_enqueue_style('acf-stripe-customer-field');
-            
-            wp_register_script('acf-stripe-customer-field', $this->url . 'assets/js/stripe-customer-field.js', ['jquery', 'acf-input', 'select2'], '1.0.1', true);
+
+            wp_register_script('acf-stripe-field-base', $this->url . 'assets/js/stripe-field-base.js', ['jquery', 'acf-input', 'select2'], '1.0.1', true);
+            wp_enqueue_script('acf-stripe-field-base');
+
+            wp_register_script('acf-stripe-customer-field', $this->url . 'assets/js/stripe-customer-field.js', ['jquery', 'acf-input', 'select2', 'acf-stripe-field-base'], '1.0.1', true);
             wp_localize_script('acf-stripe-customer-field', 'acfStripeCustomerField', [
                 'ajaxUrl' => admin_url('admin-ajax.php'),
                 'nonce' => wp_create_nonce('acf_stripe_customer_search'),
@@ -91,7 +94,7 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
             ]);
             wp_enqueue_script('acf-stripe-customer-field');
 
-            wp_register_script('acf-stripe-subscription-field', $this->url . 'assets/js/stripe-subscription-field.js', ['jquery', 'acf-input', 'select2'], '1.0.1', true);
+            wp_register_script('acf-stripe-subscription-field', $this->url . 'assets/js/stripe-subscription-field.js', ['jquery', 'acf-input', 'select2', 'acf-stripe-field-base'], '1.0.1', true);
             wp_localize_script('acf-stripe-subscription-field', 'acfStripeSubscriptionField', [
                 'ajaxUrl'    => admin_url('admin-ajax.php'),
                 'nonce'      => wp_create_nonce('acf_stripe_subscription_search'),
