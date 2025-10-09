@@ -588,20 +588,11 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
             $plan   = $this->extract_subscription_plan_name($subscription);
             $status = isset($subscription['status']) ? $subscription['status'] : '';
             $id     = isset($subscription['id']) ? $subscription['id'] : '';
+            list($customer_id, $customer_name, $customer_email) = $this->extract_subscription_customer_details($subscription);
 
-            if ($plan) {
-                return $status ? sprintf('%1$s (%2$s)', $plan, $status) : $plan;
-            }
+            $customer_display = $this->format_subscription_customer_display($customer_name, $customer_email, $customer_id);
 
-            if ($status && $id) {
-                return sprintf('%1$s (%2$s)', $id, $status);
-            }
-
-            if ($status) {
-                return $status;
-            }
-
-            return $id ? $id : __('Unknown subscription', 'acf-stripe-subscription-field');
+            return $this->build_subscription_label($plan, $customer_display, $status, $id);
         }
 
         protected function extract_subscription_plan_name($subscription)
@@ -658,22 +649,138 @@ if (!class_exists('ACF_Stripe_Customer_Field_Plugin')) {
 
         protected function prepare_subscription_item($subscription)
         {
-            $label = $this->format_subscription_label($subscription);
             $plan  = $this->extract_subscription_plan_name($subscription);
+            $status = isset($subscription['status']) ? $subscription['status'] : '';
             list($customer_id, $customer_name, $customer_email) = $this->extract_subscription_customer_details($subscription);
+            $customer_display = $this->format_subscription_customer_display($customer_name, $customer_email, $customer_id);
+            $id = isset($subscription['id']) ? $subscription['id'] : '';
+            $label = $this->build_subscription_label($plan, $customer_display, $status, $id);
 
             return [
                 'id'             => isset($subscription['id']) ? $subscription['id'] : '',
                 'text'           => $label,
                 'label'          => $label,
                 'plan'           => $plan,
-                'status'         => isset($subscription['status']) ? $subscription['status'] : '',
+                'status'         => $status,
                 'customer_id'    => $customer_id,
                 'customer_name'  => $customer_name,
                 'customer_email' => $customer_email,
                 'name'           => $customer_name,
                 'email'          => $customer_email,
+                'customer_display' => $customer_display,
             ];
+        }
+
+        public function format_subscription_customer_display($customer_name, $customer_email, $customer_id)
+        {
+            $customer_name  = trim((string) $customer_name);
+            $customer_email = trim((string) $customer_email);
+            $customer_id    = trim((string) $customer_id);
+
+            if ($customer_name && $customer_email) {
+                return sprintf('%1$s (%2$s)', $customer_name, $customer_email);
+            }
+
+            if ($customer_name) {
+                return $customer_name;
+            }
+
+            if ($customer_email) {
+                return $customer_email;
+            }
+
+            return $customer_id;
+        }
+
+
+
+        public function build_plan_label($plan_id)
+        {
+            $secret_key = $this->get_secret_key();
+            if (empty($secret_key)) {
+                return new WP_Error('missing_secret_key', __('Stripe secret key is missing.', 'acf-stripe-subscription-field'));
+            }
+
+            // Retrieve the plan object.
+            $plan_response = wp_remote_get("https://api.stripe.com/v1/plans/" . rawurlencode($plan_id), [
+                'timeout' => 20,
+                'headers' => $this->get_api_request_headers($secret_key),
+            ]);
+            if (is_wp_error($plan_response)) {
+                return new WP_Error('plan_request_failed', $plan_response->get_error_message());
+            }
+            $plan_body = json_decode(wp_remote_retrieve_body($plan_response), true);
+            if (empty($plan_body) || isset($plan_body['error'])) {
+                $message = isset($plan_body['error']['message']) ? $plan_body['error']['message'] : __('Unable to retrieve the plan from Stripe.', 'acf-stripe-subscription-field');
+                return new WP_Error('invalid_plan_response', $message);
+            }
+
+            // Retrieve the product object using the product id from the plan.
+            if (empty($plan_body['product'])) {
+                return new WP_Error('missing_product_id', __('Product id is missing from the plan object.', 'acf-stripe-subscription-field'));
+            }
+            $product_id = $plan_body['product'];
+            $product_response = wp_remote_get("https://api.stripe.com/v1/products/" . rawurlencode($product_id), [
+                'timeout' => 20,
+                'headers' => $this->get_api_request_headers($secret_key),
+            ]);
+            if (is_wp_error($product_response)) {
+                return new WP_Error('product_request_failed', $product_response->get_error_message());
+            }
+            $product_body = json_decode(wp_remote_retrieve_body($product_response), true);
+            if (empty($product_body) || isset($product_body['error'])) {
+                $message = isset($product_body['error']['message']) ? $product_body['error']['message'] : __('Unable to retrieve the product from Stripe.', 'acf-stripe-subscription-field');
+                return new WP_Error('invalid_product_response', $message);
+            }
+
+            $product_name = !empty($product_body['name']) ? $product_body['name'] : __('Unknown product', 'acf-stripe-subscription-field');
+            $amount       = isset($plan_body['amount']) ? $plan_body['amount'] : 0;
+            $currency     = isset($plan_body['currency']) ? strtoupper($plan_body['currency']) : '';
+            $interval     = isset($plan_body['interval']) ? $plan_body['interval'] : '';
+
+            // Format the amount (Stripe amounts are in cents).
+            $price = number_format($amount / 100, 2);
+
+            // Build and return the label: {product_name} {price_amount}/{price_interval}
+            return sprintf('%s %s%s/%s', $product_name, $currency, $price, $interval);
+        }
+
+
+
+        public function build_subscription_label($plan, $customer_display, $status, $id)
+        {
+            $plan             = trim((string) $plan);
+            $customer_display = trim((string) $customer_display);
+            $status           = trim((string) $status);
+            $id               = trim((string) $id);
+
+            $label = '';
+
+            if ($plan && $customer_display) {
+                $label = sprintf('%1$s – %2$s', $this->build_plan_label($plan), $customer_display);
+            } elseif ($plan) {
+                $label = $plan;
+            } elseif ($customer_display) {
+                $label = $customer_display;
+            }
+
+            if ('' === $label) {
+                $label = __('Stripe subscription', 'acf-stripe-subscription-field');
+            }
+/*
+            $meta_parts = [];
+            if ($id) {
+                $meta_parts[] = $id;
+            }
+            if ($status) {
+                $meta_parts[] = $status;
+            }
+
+            if (!empty($meta_parts)) {
+                $label .= ' [' . implode(' | ', $meta_parts) . ']';
+            }
+*/
+            return $label;
         }
     }
 }

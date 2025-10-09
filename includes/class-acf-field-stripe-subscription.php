@@ -250,9 +250,8 @@ if (!class_exists('ACF_Field_Stripe_Subscription') && class_exists('acf_field'))
                 }
 
                 // If it's not JSON or doesn't decode properly, treat as subscription ID
-                return [
+                return $this->normalize_subscription_array([
                     'id'             => $value,
-                    'label'          => $value,
                     'plan'           => '',
                     'status'         => '',
                     'customer_id'    => '',
@@ -260,7 +259,7 @@ if (!class_exists('ACF_Field_Stripe_Subscription') && class_exists('acf_field'))
                     'customer_email' => '',
                     'name'           => '',
                     'email'          => ''
-                ];
+                ]);
             }
 
             return $default;
@@ -278,36 +277,18 @@ if (!class_exists('ACF_Field_Stripe_Subscription') && class_exists('acf_field'))
                 return $subscription_data['label'];
             }
 
-            $plan   = isset($subscription_data['plan']) ? $subscription_data['plan'] : '';
-            $status = isset($subscription_data['status']) ? $subscription_data['status'] : '';
-            if ($plan && $status) {
-                return sprintf('%1$s (%2$s)', $plan, $status);
-            }
+            $customer_display = $this->plugin->format_subscription_customer_display(
+                isset($subscription_data['customer_name']) ? $subscription_data['customer_name'] : (isset($subscription_data['name']) ? $subscription_data['name'] : ''),
+                isset($subscription_data['customer_email']) ? $subscription_data['customer_email'] : (isset($subscription_data['email']) ? $subscription_data['email'] : ''),
+                isset($subscription_data['customer_id']) ? $subscription_data['customer_id'] : ''
+            );
 
-            if ($plan) {
-                return $plan;
-            }
-
-            $name = isset($subscription_data['customer_name']) ? $subscription_data['customer_name'] : (isset($subscription_data['name']) ? $subscription_data['name'] : '');
-            $email = isset($subscription_data['customer_email']) ? $subscription_data['customer_email'] : (isset($subscription_data['email']) ? $subscription_data['email'] : '');
-
-            if ($name && $email) {
-                return sprintf('%1$s (%2$s)', $name, $email);
-            }
-
-            if ($name) {
-                return $name;
-            }
-
-            if ($email) {
-                return $email;
-            }
-
-            if ($status) {
-                return $status;
-            }
-
-            return isset($subscription_data['id']) ? $subscription_data['id'] : __('Unknown subscription', 'acf-stripe-subscription-field');
+            return $this->plugin->build_subscription_label(
+                isset($subscription_data['plan']) ? $subscription_data['plan'] : '',
+                $customer_display,
+                isset($subscription_data['status']) ? $subscription_data['status'] : '',
+                isset($subscription_data['id']) ? $subscription_data['id'] : ''
+            );
         }
 
         /**
@@ -429,9 +410,18 @@ if (!class_exists('ACF_Field_Stripe_Subscription') && class_exists('acf_field'))
                 $normalized['email'] = $normalized['customer_email'];
             }
 
-            if (empty($normalized['label'])) {
-                $normalized['label'] = $this->format_subscription_label_from_data($normalized);
-            }
+            $customer_display = $this->plugin->format_subscription_customer_display(
+                $normalized['customer_name'],
+                $normalized['customer_email'],
+                $normalized['customer_id']
+            );
+
+            $normalized['label'] = $this->plugin->build_subscription_label(
+                $normalized['plan'],
+                $customer_display,
+                $normalized['status'],
+                $normalized['id']
+            );
 
             return $normalized;
         }
@@ -473,9 +463,16 @@ if (!class_exists('ACF_Field_Stripe_Subscription') && class_exists('acf_field'))
                 }
             }
 
+            $label = $this->plugin->build_subscription_label(
+                $plan_name,
+                $this->plugin->format_subscription_customer_display($customer_name, $customer_email, $customer_id),
+                isset($subscription['status']) ? $subscription['status'] : '',
+                isset($subscription['id']) ? $subscription['id'] : ''
+            );
+
             return [
                 'id'             => isset($subscription['id']) ? $subscription['id'] : '',
-                'label'          => $this->plugin->format_subscription_label($subscription),
+                'label'          => $label,
                 'plan'           => $plan_name,
                 'status'         => isset($subscription['status']) ? $subscription['status'] : '',
                 'customer_id'    => $customer_id,
