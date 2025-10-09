@@ -296,28 +296,10 @@
 
         $select.data('stripe-subscription-initialized', true);
 
-        var $clearButton = $field.find('.acf-stripe-select-clear');
-
-        function updateClearButtonState() {
-            if (!$clearButton.length) {
-                return;
-            }
-
-            var hasValue = !!$select.val();
-            var disabled = !hasValue || $select.is(':disabled');
-            $clearButton.prop('disabled', disabled).attr('aria-disabled', disabled ? 'true' : 'false');
-            if (!hasValue) {
-                $clearButton.removeClass('is-active');
-            } else {
-                $clearButton.addClass('is-active');
-            }
-        }
-
         if (!config || !config.isConnected) {
             $select.prop('disabled', true);
             $field.find('.acf-stripe-subscription-notice').show();
             hydrateInitialOption($field, $select);
-            updateClearButtonState();
             return;
         }
 
@@ -358,28 +340,7 @@
             $select.val('').trigger('change');
         });
 
-        if ($clearButton.length) {
-            $clearButton.on('click', function(event) {
-                event.preventDefault();
-
-                if ($select.is(':disabled') || $clearButton.is(':disabled')) {
-                    return;
-                }
-
-                if ($select.data('select2')) {
-                    $select.val(null).trigger('change');
-                    $select.trigger('change.select2');
-                } else {
-                    $select.val('').trigger('change');
-                }
-            });
-        }
-
         debugLog('ACF Stripe Subscription: initialized field', $field);
-
-        updateClearButtonState();
-
-        $select.on('change', updateClearButtonState);
     }
 
     function registerHandlers() {
