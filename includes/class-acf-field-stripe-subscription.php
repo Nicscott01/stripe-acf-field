@@ -137,6 +137,14 @@ if (!class_exists('ACF_Field_Stripe_Subscription') && class_exists('acf_field'))
 
             echo '</select>';
 
+            if ($allow_null) {
+                printf(
+                    '<button type="button" class="button acf-stripe-select-clear" data-target="%1$s">%2$s</button>',
+                    esc_attr($field['name']),
+                    esc_html__('Clear', 'acf-stripe-subscription-field')
+                );
+            }
+
             // Store subscription data in hidden field for JavaScript access
             if (!empty($subscription_data['id'])) {
                 $hidden_data = [
