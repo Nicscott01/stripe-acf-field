@@ -42,6 +42,10 @@ if (!class_exists('ACF_Field_Stripe_Base') && class_exists('acf_field')) {
                 'placeholder'   => sprintf(__('Select a Stripe %s', 'acf-stripe-field'), $this->get_object_display_name()),
                 'allow_null'    => 0,
             ];
+            $this->supports = array_merge($this->supports, [
+                'multiple' => false,
+                'conditional_logic' => true,
+            ]);
 
             parent::__construct();
         }
@@ -128,6 +132,69 @@ if (!class_exists('ACF_Field_Stripe_Base') && class_exists('acf_field')) {
                     'object' => sprintf(__('Stripe %s object', 'acf-stripe-field'), $object_name),
                 ],
             ]);
+
+            acf_render_field_setting($field, [
+                'label'        => __('Context Provider Field', 'acf-stripe-field'),
+                'instructions' => __('Optional. Choose another field whose value should be used to filter or populate this field.', 'acf-stripe-field'),
+                'type'         => 'select',
+                'name'         => 'context_field_key',
+                'ui'           => 1,
+                'ajax'         => 0,
+                'choices'      => $this->get_available_context_fields($field),
+                'allow_null'   => 1,
+            ]);
+
+            acf_render_field_setting($field, [
+                'label'        => __('Context Mapping', 'acf-stripe-field'),
+                'instructions' => __('Enter dot notation for mapping the provider value to this field. Example: customer.id or product.default_price.id', 'acf-stripe-field'),
+                'type'         => 'text',
+                'name'         => 'context_mapping',
+                'placeholder'  => __('customer.id', 'acf-stripe-field'),
+                'conditional_logic' => [
+                    [
+                        [
+                            'field'    => 'context_field_key',
+                            'operator' => '!=',
+                            'value'    => '',
+                        ],
+                    ],
+                ],
+            ]);
+        }
+
+        /**
+         * Provide available context fields for the select dropdown.
+         *
+         * @param array $field Current field.
+         * @return array
+         */
+        protected function get_available_context_fields($field)
+        {
+            if (empty($field['parent'])) {
+                return [];
+            }
+
+            $parent = acf_get_field_group($field['parent']);
+            if (!$parent) {
+                return [];
+            }
+
+            $fields = acf_get_fields($parent);
+            if (!$fields) {
+                return [];
+            }
+
+            $choices = [];
+            foreach ($fields as $candidate) {
+                if (!isset($candidate['key']) || $candidate['key'] === $field['key']) {
+                    continue;
+                }
+
+                $label = isset($candidate['label']) ? $candidate['label'] : $candidate['name'];
+                $choices[$candidate['key']] = sprintf('%s (%s)', $label, $candidate['type']);
+            }
+
+            return $choices;
         }
 
         /**
@@ -154,6 +221,9 @@ if (!class_exists('ACF_Field_Stripe_Base') && class_exists('acf_field')) {
             $allow_null  = !empty($field['allow_null']);
             $connected   = $this->plugin->is_connected();
 
+            $context_field_key = isset($field['context_field_key']) ? $field['context_field_key'] : '';
+            $context_mapping   = isset($field['context_mapping']) ? $field['context_mapping'] : '';
+
             $select_attributes = [
                 'class'                 => 'acf-stripe-' . str_replace('_', '-', $this->get_stripe_object_type()) . '-select',
                 'name'                  => $field['name'],
@@ -162,6 +232,14 @@ if (!class_exists('ACF_Field_Stripe_Base') && class_exists('acf_field')) {
                 'data-selected-text'    => $selected_label,
                 'data-stripe-object-type' => $this->get_stripe_object_type(),
             ];
+
+            if ($context_field_key) {
+                $select_attributes['data-context-field'] = $context_field_key;
+            }
+
+            if ($context_mapping) {
+                $select_attributes['data-context-mapping'] = $context_mapping;
+            }
 
             if (!$connected) {
                 $select_attributes['disabled'] = 'disabled';

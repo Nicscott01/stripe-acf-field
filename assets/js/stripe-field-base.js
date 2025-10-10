@@ -8,12 +8,58 @@
 (function($) {
     'use strict';
 
+    if (typeof acf !== 'undefined' && typeof acf.registerFieldType === 'function') {
+        ['stripe_customer', 'stripe_subscription', 'stripe_product'].forEach(function(typeKey) {
+            /*if (acf.getFieldType && acf.getFieldType(typeKey)) {
+                return;
+            }*/
+
+            var SelectModel = (acf.models && acf.models.Select) ? acf.models.Select : acf.Field;
+
+            var BasicStripeField = SelectModel.extend({
+                type: typeKey,
+                /*supports: $.extend({}, (SelectModel.prototype && SelectModel.prototype.supports) || {}, {
+                    conditionalLogic: true
+                }),*/
+                supports: {
+                    conditionalLogic: true
+                },
+                $input: function() {
+                    return this.$el.find('select');
+                },
+                getValue: function() {
+                    var $input = this.$input();
+                    return $input.length ? $input.val() : null;
+                },
+                setValue: function(val) {
+                    var $input = this.$input();
+                    if (!$input.length) {
+                        return;
+                    }
+                    if ($input.val() !== val) {
+                        $input.val(val).trigger('change');
+                    }
+                },
+                initialize: function() {
+                // Fire change to initialize conditional logic
+                this.$input().trigger('change');
+            }
+            });
+
+
+
+            acf.registerFieldType(BasicStripeField);
+        });
+    }
+
     /**
      * Base Stripe Field Class
      * 
      * @param {string} objectType - The Stripe object type (customer, subscription, etc.)
      * @param {Object} config - Configuration object for this field type
      */
+    const registeredFieldTypes = {};
+
     class ACFStripeFieldBase {
         constructor(objectType, config = {}) {
             this.objectType = objectType;
@@ -57,6 +103,7 @@
             }, config);
 
             this.init();
+            this.registerFieldType();
         }
 
         /**
@@ -108,6 +155,81 @@
         }
 
         /**
+         * Register the field type with ACF so conditional logic and other features work.
+         */
+        registerFieldType() {
+            if (typeof acf === 'undefined') {
+                return;
+            }
+
+            const typeKey = `stripe_${this.objectType}`;
+
+            if (registeredFieldTypes[typeKey]) {
+                return;
+            }
+
+            const selector = this.config.fieldSelector;
+            const SelectModel = (acf.models && acf.models.Select) ? acf.models.Select : acf.Field;
+
+            const FieldModel = SelectModel.extend({
+                type: typeKey,
+                supports: $.extend({}, SelectModel.prototype.supports || {}, {
+                    conditionalLogic: true
+                }),
+                events: $.extend({}, SelectModel.prototype.events || {}, {
+                    'change select': 'onChange'
+                }),
+                $input: function() {
+                    return this.$el.find(selector);
+                },
+                getValue: function() {
+                    const $input = this.$input();
+                    if (!$input.length) {
+                        return null;
+                    }
+                    return $input.val();
+                },
+                setValue: function(val) {
+                    const $input = this.$input();
+                    if (!$input.length) {
+                        return;
+                    }
+
+                    if ($input.val() === val) {
+                        return;
+                    }
+
+                    $input.val(val).trigger('change');
+                },
+                onChange: function() {
+                    if (typeof SelectModel.prototype.onChange === 'function') {
+                        SelectModel.prototype.onChange.apply(this, arguments);
+                    }
+                    this.trigger('change');
+                }
+            });
+
+            if (typeof acf.registerFieldType === 'function') {
+                acf.registerFieldType(FieldModel);
+            } else if (acf.fields) {
+                acf.fields[typeKey] = FieldModel;
+            }
+
+            registeredFieldTypes[typeKey] = {
+                field: FieldModel
+            };
+        }
+
+        getObjectDisplayName() {
+            if (this.config.objectDisplayName) {
+                return this.config.objectDisplayName;
+            }
+
+            const type = this.objectType.replace('_', ' ');
+            return type.charAt(0).toUpperCase() + type.slice(1);
+        }
+
+        /**
          * Initialize a single field instance
          * 
          * @param {Object} field - ACF field object or jQuery element
@@ -141,6 +263,7 @@
             }
             
             $select = $field.find(this.config.fieldSelector);
+            console.log( "$select", $select)
             if (!$select.length) {
                 console.warn(`ACF Stripe ${this.objectType} Field: Could not find select element`);
                 return;
