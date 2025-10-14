@@ -49,6 +49,8 @@
 
 
             acf.registerFieldType(BasicStripeField);
+            acf.registerConditionForFieldType('hasValue', typeKey );
+            
         });
     }
 
